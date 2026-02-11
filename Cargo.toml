@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  "crates/zavora-core",
+  "crates/zavora-eventstore",
+  "crates/zavora-finance",
+  "crates/zavora-inventory",
+  "crates/zavora-agents",
+  "crates/zavora-tools",
+  "crates/zavora-server",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["Zavora"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["serde", "v4"] }

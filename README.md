@@ -1,3 +1,27 @@
+# Zavora Agentic ERP
+
+This repository now includes an initial Rust workspace scaffold for the Zavora Agentic ERP MVP described below.
+
+## Workspace layout
+
+- `crates/zavora-core`: Domain models, event definitions, standards profile, and storage traits.
+- `crates/zavora-eventstore`: In-memory event store implementation and projection placeholder.
+- `crates/zavora-finance`: IFRS-lite posting primitive for invoice journals.
+- `crates/zavora-inventory`: Inventory position model with weighted-average (AVCO) movement logic.
+- `crates/zavora-tools`: Tool interface traits for messaging, inventory lookup, and commitments.
+- `crates/zavora-agents`: Early agent loop traits and starter Sales/Board agents.
+- `crates/zavora-server`: Minimal runtime entrypoint.
+
+## Quick start
+
+```bash
+cargo fmt
+cargo check
+cargo run -p zavora-server
+```
+
+---
+
 Zavora Agentic ERP – Minimum Viable Product (MVP) Plan
 Overview
 

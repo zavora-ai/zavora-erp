@@ -1,0 +1,13 @@
+[package]
+name = "zavora-finance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rust_decimal.workspace = true
+serde.workspace = true
+uuid.workspace = true
+zavora-core = { path = "../zavora-core" }
+zavora-eventstore = { path = "../zavora-eventstore" }
