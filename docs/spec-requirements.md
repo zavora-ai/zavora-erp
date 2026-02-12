@@ -16,6 +16,8 @@
 - `FR-003 (P0)` Generate forecast values for revenue, cost, and cash by period.
 - `FR-004 (P0)` Compute target-vs-actual variance and classify variance severity.
 - `FR-005 (P0)` Trigger corrective-action workflow when variance breaches threshold.
+- `FR-062 (P0)` Maintain an organization charter artifact with vision, mission, values, and formal org chart.
+- `FR-063 (P0)` Maintain an agent identity registry with unique agent IDs, mandates, authority limits, skills, memory scopes, and escalation paths.
 
 ### 2.2 FU-02 Business Origination
 
@@ -76,6 +78,10 @@
 - `FR-052 (P1)` Support composed skill chains with deterministic handoff between skills.
 - `FR-053 (P0)` Trigger bounded retry, fallback skill, or escalation path on skill execution failure.
 - `FR-054 (P1)` Track skill effectiveness metrics (success, latency, intervention rate) by skill version.
+- `FR-057 (P0)` Persist per-agent semantic memories with scope, context tags, and source reference.
+- `FR-058 (P0)` Retrieve ranked semantic memories by agent and context before execution steps.
+- `FR-059 (P1)` Expose semantic memory read/write operations through an MCP-compatible interface for agent tooling.
+- `FR-060 (P1)` Apply memory retention and staleness policies by scope.
 
 ### 2.9 FU-09 Audit and Compliance Evidence
 
@@ -84,6 +90,7 @@
 - `FR-041 (P0)` Link commitment, obligation, proof, and settlement artifacts.
 - `FR-042 (P1)` Export audit evidence package per transaction or period.
 - `FR-055 (P0)` Persist skill invocation evidence (skill ID/version, input/output hash, result, actor) linked to proof records.
+- `FR-061 (P0)` Persist semantic memory provenance (memory ID, source, actor, timestamp, access trace) linked to proof records.
 
 ### 2.10 FU-10 Agent Payroll and Cost Allocation
 
@@ -115,6 +122,7 @@
 - `NFR-008 (P0)` Non-local deployments require authenticated access.
 - `NFR-009 (P0)` Sensitive data must be encrypted in transit.
 - `NFR-010 (P1)` Governance and finance actions must be role-restricted.
+- `NFR-029 (P0)` Runtime actions must be attributable to a registered agent identity.
 
 ### 3.4 Operability
 
@@ -141,6 +149,13 @@
 - `NFR-022 (P0)` Every skill invocation must pass declared schema contract checks before execution.
 - `NFR-023 (P1)` Skill failures must resolve to retry, fallback, or escalation within configured SLA bounds.
 - `NFR-024 (P1)` Skill telemetry coverage must capture outcome and latency for at least 99% of invocations.
+
+### 3.8 Semantic Memory Integrity
+
+- `NFR-025 (P1)` Semantic memory retrieval p95 latency must remain under 300 ms for demo dataset size.
+- `NFR-026 (P0)` Every semantic memory write must include actor, source reference, and timestamp metadata.
+- `NFR-027 (P1)` Memory retention policies must run at least daily with no silent data loss.
+- `NFR-028 (P1)` Semantic memory retrieval and access traces must be auditable end-to-end.
 
 ## 4. Acceptance Rule
 

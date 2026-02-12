@@ -7,9 +7,11 @@ This roadmap is aligned to functional units FU-01 through FU-10.
 Scope:
 - Finalize constitution-aligned service model.
 - Establish strategy-to-execution target model and variance governance.
+- Establish official organization charter and agent identity registry.
 
 Exit criteria:
 - FU-01 operating model approved.
+- Organization charter and agent identity registry approved as controlled artifacts.
 - Traceability framework active.
 
 ## RM-02 Origination and Commercial Conversion
@@ -26,11 +28,13 @@ Exit criteria:
 Scope:
 - Deliver FU-03 processing and FU-08 autonomy controls.
 - Implement skill registry, capability routing, and skill-chain execution for autonomous work.
+- Implement per-agent semantic memory service and retrieval/write-back hooks.
 - Support product and service execution variants.
 
 Exit criteria:
 - Product and service scenario both complete autonomously unless policy requires escalation.
 - Agents execute through approved skills with measurable success and fallback behavior.
+- Agents recall and store semantic memories as part of normal autonomous execution.
 
 ## RM-04 Product Operations (Inventory and Procurement)
 
@@ -74,6 +78,7 @@ Exit criteria:
 Scope:
 - Deliver FU-09 replay and evidence packaging.
 - Ensure complete traceability across commitments, obligations, proofs, settlements.
+- Include skill and semantic-memory provenance in evidence exports.
 
 Exit criteria:
 - End-to-end transaction evidence export is complete and reproducible.

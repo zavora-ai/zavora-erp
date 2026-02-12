@@ -12,11 +12,15 @@ In scope:
 - KPI targets by period, business unit, and agent mandate
 - Forecasting and variance tracking
 - Corrective action triggers when variance exceeds threshold
+- Organization charter (vision, mission, values, org chart)
+- Agent identity registry with mandates and authority boundaries
 
 Outputs:
 - Strategy model
 - Target registry
 - Forecast and variance decisions
+- Organization charter artifact (`organization.md`)
+- Agent identity registry artifact (`agents.md`)
 
 KPIs:
 - Target attainment
@@ -160,6 +164,8 @@ In scope:
 - Autonomous decisions within mandate
 - Skill-driven execution through approved capability packs
 - Skill selection and routing by intent, policy, and context
+- Per-agent semantic memory retrieval before action execution
+- Per-agent semantic memory write-back after material outcomes
 - Skill fallback and escalation when execution confidence is low
 - Human-in-the-loop only for policy-triggered exceptions
 - Decision rationale persistence
@@ -167,11 +173,13 @@ In scope:
 Outputs:
 - Autonomous execution trail
 - Skill invocation and outcome records
+- Memory recall and memory write records
 - Exception queue outcomes
 
 KPIs:
 - Autonomous completion rate
 - Skill invocation success rate
+- Semantic memory hit rate
 - Human intervention ratio
 
 ## FU-09 Audit and Compliance Evidence
@@ -182,6 +190,7 @@ Provide replayable and complete evidence for all material actions.
 In scope:
 - Immutable event history
 - Commitment-obligation-proof-settlement linkage
+- Skill and semantic-memory evidence linkage
 - Transaction timeline and evidence packaging
 
 Outputs:

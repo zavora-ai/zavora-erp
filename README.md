@@ -73,6 +73,7 @@ Services:
 - `zavora-gateway`: accepts orders and publishes workflow event
 - `zavora-ops`: processes workflow (inventory movement, journals, settlement)
 - `zavora-board`: exposes board pack KPI endpoint
+- `zavora-memory`: provides long-term semantic memory APIs (MCP-facing for agent tooling)
 - `postgres`: record system
 - `redis`: event transport
 
@@ -107,11 +108,18 @@ If your machine already uses `5432` or `6379`:
 POSTGRES_PORT=55432 REDIS_PORT=56379 docker compose up --build
 ```
 
+If you already had an older Postgres volume before this update, apply the latest schema once:
+
+```bash
+docker compose exec -T postgres psql -U zavora -d zavora -f /docker-entrypoint-initdb.d/001_schema.sql
+```
+
 Health checks:
 
 ```bash
 curl http://localhost:8080/healthz
 curl http://localhost:8090/healthz
+curl http://localhost:8100/healthz
 ```
 
 Create a transaction (current baseline API):
@@ -134,6 +142,33 @@ Read board pack:
 curl http://localhost:8090/board/pack
 ```
 
+Write semantic memory example:
+
+```bash
+curl -X POST http://localhost:8100/memory/entries \
+  -H 'content-type: application/json' \
+  -d '{
+    "agent_name": "sales-agent",
+    "scope": "ORDER",
+    "content": "Customer accepted quote only after 2% discount and 14-day payment terms.",
+    "keywords": ["discount", "payment-terms", "negotiation"],
+    "source_ref": "order:demo-001"
+  }'
+```
+
+Search semantic memory example:
+
+```bash
+curl -X POST http://localhost:8100/memory/search \
+  -H 'content-type: application/json' \
+  -d '{
+    "agent_name": "sales-agent",
+    "query": "discount negotiation",
+    "scope": "ORDER",
+    "limit": 5
+  }'
+```
+
 Note:
 - The current API models a product-style transaction.
 - The spec now requires hybrid support where a business can sell a product or a service.
@@ -147,7 +182,8 @@ For each run, verify:
 3. financial postings and settlement records,
 4. product/service cost capture,
 5. board KPI and variance movement,
-6. skill selection, skill execution outcomes, and skill-level evidence capture.
+6. skill selection, skill execution outcomes, and skill-level evidence capture,
+7. semantic memory retrieval and learning write-back evidence for each agent.
 
 ## 7) Documentation Map
 
@@ -158,6 +194,8 @@ Primary documents:
 4. `docs/spec-requirements.md`
 5. `docs/spec-design-and-tasks.md`
 6. `docs/sequence-diagrams-user-journeys.md`
+7. `docs/organization.md`
+8. `docs/agents.md`
 
 ## 8) Delivery Standard
 

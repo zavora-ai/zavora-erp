@@ -4,8 +4,8 @@ This document defines design specifications and delivery tasks mapped directly t
 
 ## 1. Design Specifications
 
-- `DS-001` Strategy-to-execution model (business model entities, KPI target registry, forecast and variance logic).
-  - Covers: `FR-001..FR-005`
+- `DS-001` Strategy-to-execution model (business model entities, KPI target registry, forecast and variance logic, organizational charter outputs).
+  - Covers: `FR-001..FR-005`, `FR-062`
 
 - `DS-002` Business origination domain model (lead, opportunity, quote, acceptance proof, executable demand intent).
   - Covers: `FR-006..FR-010`
@@ -26,10 +26,10 @@ This document defines design specifications and delivery tasks mapped directly t
   - Covers: `FR-032..FR-035`
 
 - `DS-008` Agent autonomy and skill-execution model (mandate-aware autonomy, capability routing, policy-triggered HITL, rationale persistence).
-  - Covers: `FR-036..FR-038`, `FR-049..FR-054`
+  - Covers: `FR-036..FR-038`, `FR-049..FR-054`, `FR-057..FR-060`
 
 - `DS-009` Audit and compliance evidence model (immutable events, timeline replay, artifact linkage, evidence export, skill-evidence linkage).
-  - Covers: `FR-039..FR-042`, `FR-055`
+  - Covers: `FR-039..FR-042`, `FR-055`, `FR-061`
 
 - `DS-010` Agent payroll and cost-allocation model (token/cloud/subscription metering, allocation, payroll journals, margin views, skill-level costing).
   - Covers: `FR-043..FR-048`, `FR-056`
@@ -58,6 +58,12 @@ This document defines design specifications and delivery tasks mapped directly t
 - `DS-018` Skill runtime governance model (approved versions, contract validation, fallback controls, telemetry coverage).
   - Covers: `NFR-021..NFR-024`
 
+- `DS-019` Semantic memory model (MCP-facing memory API, long-term storage, retrieval ranking, retention controls, memory audit traces).
+  - Covers: `NFR-025..NFR-028`
+
+- `DS-020` Agent identity governance model (identity registry, mandate boundaries, identity-to-action attribution controls).
+  - Covers: `FR-063`, `NFR-029`
+
 ## 2. Delivery Tasks
 
 ### 2.1 Wave A - Foundation and Traceability
@@ -66,6 +72,8 @@ This document defines design specifications and delivery tasks mapped directly t
 - `TSK-002` Implement KPI target registry by period and mandate. (`DS-001`)
 - `TSK-003` Implement forecast baseline generation for revenue, cost, and cash. (`DS-001`)
 - `TSK-004` Implement variance classification and corrective-action trigger workflow. (`DS-001`)
+- `TSK-088` Create and maintain organization charter artifact (`organization.md`) with org chart, vision, mission, and values. (`DS-001`)
+- `TSK-089` Create and maintain agent identity registry artifact (`agents.md`) with mandates, limits, and escalation paths. (`DS-020`)
 - `TSK-005` Define canonical identifiers and event naming conventions for all domain entities. (`DS-002`, `DS-009`)
 - `TSK-006` Implement correlation ID propagation across all services. (`DS-015`)
 - `TSK-007` Implement requirement-to-design-to-task traceability ledger templates. (`DS-016`)
@@ -176,21 +184,29 @@ This document defines design specifications and delivery tasks mapped directly t
 - `TSK-079` Enforce approved/version-pinned skill execution in governed environments. (`DS-018`)
 - `TSK-080` Implement skill telemetry pipeline for outcome, latency, and intervention metrics. (`DS-018`)
 - `TSK-081` Add acceptance tests for skill runtime integrity controls and SLAs. (`DS-018`, `DS-016`)
+- `TSK-082` Implement semantic memory storage schema with scope, tags, source metadata, and indexes. (`DS-019`)
+- `TSK-083` Implement memory service APIs for memory write and ranked memory retrieval. (`DS-019`)
+- `TSK-084` Implement MCP-compatible memory tool interface for agent runtime usage. (`DS-019`, `DS-008`)
+- `TSK-085` Implement memory provenance linkage from retrieval/write actions to proof records. (`DS-009`, `DS-019`)
+- `TSK-086` Implement pre-action memory recall and post-action learning write-back hooks in agent workflow. (`DS-008`, `DS-019`)
+- `TSK-087` Implement memory retention policy worker and observability checks. (`DS-019`)
+- `TSK-090` Enforce identity-to-action attribution checks in runtime workflow and policy gate evaluation. (`DS-020`)
 
 ## 3. Traceability Matrix
 
 ### 3.1 Functional Coverage
 
-- `FR-001..FR-005` -> `DS-001` -> `TSK-001..TSK-004`
+- `FR-001..FR-005`, `FR-062` -> `DS-001` -> `TSK-001..TSK-004`, `TSK-088`
 - `FR-006..FR-010` -> `DS-002` -> `TSK-009..TSK-014`
 - `FR-011..FR-015` -> `DS-003` -> `TSK-015..TSK-022`
 - `FR-016..FR-021` -> `DS-004` -> `TSK-023..TSK-030`
 - `FR-022..FR-026` -> `DS-005` -> `TSK-031..TSK-038`
 - `FR-027..FR-031` -> `DS-006` -> `TSK-039..TSK-043`
 - `FR-032..FR-035` -> `DS-007` -> `TSK-044..TSK-047`
-- `FR-036..FR-038`, `FR-049..FR-054` -> `DS-008` -> `TSK-048..TSK-051`, `TSK-072..TSK-076`
-- `FR-039..FR-042`, `FR-055` -> `DS-009` -> `TSK-052..TSK-055`, `TSK-077`
+- `FR-036..FR-038`, `FR-049..FR-054`, `FR-057..FR-060` -> `DS-008` -> `TSK-048..TSK-051`, `TSK-072..TSK-076`, `TSK-084`, `TSK-086`
+- `FR-039..FR-042`, `FR-055`, `FR-061` -> `DS-009` -> `TSK-052..TSK-055`, `TSK-077`, `TSK-085`
 - `FR-043..FR-048`, `FR-056` -> `DS-010` -> `TSK-056..TSK-061`, `TSK-078`
+- `FR-063` -> `DS-020` -> `TSK-089`, `TSK-090`
 
 ### 3.2 Non-Functional Coverage
 
@@ -202,6 +218,8 @@ This document defines design specifications and delivery tasks mapped directly t
 - `NFR-014..NFR-016` -> `DS-016` -> `TSK-068`, `TSK-069`
 - `NFR-017..NFR-020` -> `DS-017` -> `TSK-056..TSK-060`, `TSK-071`
 - `NFR-021..NFR-024` -> `DS-018` -> `TSK-072`, `TSK-074`, `TSK-076`, `TSK-079..TSK-081`
+- `NFR-025..NFR-028` -> `DS-019` -> `TSK-082..TSK-087`
+- `NFR-029` -> `DS-020` -> `TSK-090`
 
 ## 4. Execution Rules
 

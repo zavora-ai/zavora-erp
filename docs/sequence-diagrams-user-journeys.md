@@ -5,22 +5,24 @@ This document defines review-ready user journeys and sequence diagrams for each 
 ## FU-01 Strategy-to-Execution Layer
 
 User journey:
-1. Board defines business model and KPI targets for the period.
-2. Strategy agent records targets and forecast baselines.
-3. Variance engine compares actuals vs targets continuously.
-4. If variance crosses threshold, corrective action is opened automatically.
-5. Governance is notified for high-severity variance.
+1. Board defines organization charter and KPI strategy for the period.
+2. Strategy agent publishes targets and forecast baselines.
+3. Identity registry confirms agent mandates and authority boundaries.
+4. Variance engine compares actuals vs targets continuously.
+5. Governance is notified when corrective action is required.
 
 ```mermaid
 sequenceDiagram
     participant Board
     participant StrategyAgent
+    participant IdentityRegistry
     participant KPIEngine
     participant GovernanceAgent
     participant EventStore
 
-    Board->>StrategyAgent: Set business model and KPI targets
+    Board->>StrategyAgent: Set organization charter and KPI targets
     StrategyAgent->>EventStore: Persist target registry
+    StrategyAgent->>IdentityRegistry: Register and validate agent mandates
     KPIEngine->>EventStore: Read actuals and forecast data
     KPIEngine->>StrategyAgent: Compute variance
     alt Variance within threshold
@@ -199,9 +201,9 @@ sequenceDiagram
 User journey:
 1. Agent loop picks next eligible work item.
 2. Agent resolves required capabilities to approved skills and versions.
-3. Agent executes autonomously within mandate through selected skills.
-4. If exception is triggered, workflow is routed to human queue.
-5. Resolved exception returns control to autonomous loop with rationale persisted.
+3. Agent retrieves relevant semantic memories before acting.
+4. Agent executes autonomously within mandate through selected skills.
+5. Agent writes new learnings to long-term memory and escalates only when policy triggers exception.
 
 ```mermaid
 sequenceDiagram
@@ -209,6 +211,7 @@ sequenceDiagram
     participant PolicyEngine
     participant SkillRegistry
     participant SkillRuntime
+    participant MemoryStore
     participant ExceptionQueue
     participant HumanApprover
     participant EventStore
@@ -216,7 +219,9 @@ sequenceDiagram
     LoopAgent->>PolicyEngine: Check autonomy eligibility
     alt Eligible
         LoopAgent->>SkillRegistry: Resolve capability to approved skill version
+        LoopAgent->>MemoryStore: Retrieve relevant semantic memories
         LoopAgent->>SkillRuntime: Execute selected skill chain
+        LoopAgent->>MemoryStore: Write post-action learning summary
         SkillRuntime->>EventStore: Store skill invocation evidence
         LoopAgent->>EventStore: Store rationale and proof
     else Exception triggered
@@ -231,7 +236,7 @@ sequenceDiagram
 User journey:
 1. Auditor requests evidence for transaction or period.
 2. Audit service replays timeline from immutable events.
-3. Linked commitment, obligation, proof, and settlement artifacts are assembled.
+3. Linked commitment, obligation, proof, settlement, and memory provenance artifacts are assembled.
 4. Evidence package is generated and signed.
 5. Auditor reviews reproducible package.
 
