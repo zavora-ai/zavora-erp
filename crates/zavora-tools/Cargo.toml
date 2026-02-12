@@ -9,6 +9,7 @@ authors.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
+uuid.workspace = true
 zavora-core = { path = "../zavora-core" }
 zavora-eventstore = { path = "../zavora-eventstore" }
 zavora-finance = { path = "../zavora-finance" }

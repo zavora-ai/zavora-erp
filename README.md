@@ -122,17 +122,94 @@ curl http://localhost:8090/healthz
 curl http://localhost:8100/healthz
 ```
 
-Create a transaction (current baseline API):
+Create a lead (business origination):
+
+```bash
+curl -X POST http://localhost:8080/origination/leads \
+  -H 'content-type: application/json' \
+  -d '{
+    "contact_email": "procurement@acme.com",
+    "source_channel": "EMAIL",
+    "note": "Needs implementation services and starter SKU bundle",
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Create an opportunity (replace `LEAD_ID` with the lead ID from previous response):
+
+```bash
+curl -X POST http://localhost:8080/origination/opportunities \
+  -H 'content-type: application/json' \
+  -d '{
+    "lead_id": "LEAD_ID",
+    "customer_email": "procurement@acme.com",
+    "transaction_type": "SERVICE",
+    "item_code": "SVC-IMPLEMENTATION",
+    "quantity": "1",
+    "target_unit_price": "1200.00",
+    "currency": "USD",
+    "risk_class": "STANDARD",
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Create a quote (replace `OPPORTUNITY_ID` from previous response):
+
+```bash
+curl -X POST http://localhost:8080/origination/quotes \
+  -H 'content-type: application/json' \
+  -d '{
+    "opportunity_id": "OPPORTUNITY_ID",
+    "unit_price": "1100.00",
+    "payment_terms_days": 14,
+    "valid_for_days": 14,
+    "risk_note": "Inside mandate",
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Accept the quote and trigger executable demand (replace `QUOTE_ID` from previous response):
+
+```bash
+curl -X POST http://localhost:8080/origination/quotes/QUOTE_ID/accept \
+  -H 'content-type: application/json' \
+  -d '{
+    "accepted_by": "procurement@acme.com",
+    "acceptance_channel": "EMAIL",
+    "proof_ref": "email:thread-2026-02-12-001",
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Create a direct transaction (bypassing origination):
 
 ```bash
 curl -X POST http://localhost:8080/orders \
   -H 'content-type: application/json' \
   -d '{
     "customer_email": "buyer@acme.com",
+    "transaction_type": "PRODUCT",
     "item_code": "SKU-001",
     "quantity": "5",
     "unit_price": "49.99",
-    "currency": "USD"
+    "currency": "USD",
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Create a service transaction:
+
+```bash
+curl -X POST http://localhost:8080/orders \
+  -H 'content-type: application/json' \
+  -d '{
+    "customer_email": "client@acme.com",
+    "transaction_type": "SERVICE",
+    "item_code": "SVC-IMPLEMENTATION",
+    "quantity": "1",
+    "unit_price": "1200.00",
+    "currency": "USD",
+    "requested_by_agent_id": "sales-agent"
   }'
 ```
 
@@ -170,9 +247,9 @@ curl -X POST http://localhost:8100/memory/search \
 ```
 
 Note:
-- The current API models a product-style transaction.
-- The spec now requires hybrid support where a business can sell a product or a service.
-- Service-specific workflows are tracked in the docs below and will be implemented against the same governance/accounting model.
+- Current baseline supports both product and service transactions.
+- Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
+- Board pack includes pipeline counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`) in addition to fulfillment and finance metrics.
 
 ## 6) Functional Verification Evidence
 

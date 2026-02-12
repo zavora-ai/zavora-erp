@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zavora-postgres
+    environment:
+      POSTGRES_DB: zavora
+      POSTGRES_USER: zavora
+      POSTGRES_PASSWORD: zavora
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zavora -d zavora"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    container_name: zavora-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+      args:
+        BINARY: zavora-gateway
+    container_name: zavora-gateway
+    environment:
+      DATABASE_URL: postgres://zavora:zavora@postgres:5432/zavora
+      REDIS_URL: redis://redis:6379/
+      HTTP_ADDR: 0.0.0.0:8080
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+
+  ops:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+      args:
+        BINARY: zavora-ops
+    container_name: zavora-ops
+    environment:
+      DATABASE_URL: postgres://zavora:zavora@postgres:5432/zavora
+      REDIS_URL: redis://redis:6379/
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  board:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+      args:
+        BINARY: zavora-board
+    container_name: zavora-board
+    environment:
+      DATABASE_URL: postgres://zavora:zavora@postgres:5432/zavora
+      REDIS_URL: redis://redis:6379/
+      HTTP_ADDR: 0.0.0.0:8090
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BOARD_PORT:-8090}:8090"
+
+  memory:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+      args:
+        BINARY: zavora-memory
+    container_name: zavora-memory
+    environment:
+      DATABASE_URL: postgres://zavora:zavora@postgres:5432/zavora
+      REDIS_URL: redis://redis:6379/
+      HTTP_ADDR: 0.0.0.0:8100
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${MEMORY_PORT:-8100}:8100"
+
+volumes:
+  pgdata:
+  redisdata:
