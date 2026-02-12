@@ -66,7 +66,8 @@ Out of scope (MVP):
 
 ## 4) Current Implementation Baseline
 
-The current repository provides a runnable microservice baseline for order intake, autonomous processing, and board KPI output.
+The implementation baseline is defined as full functional coverage of units `1..10` in this README.
+A baseline is only considered complete when all 10 units are implemented and demonstrated with evidence.
 
 Services:
 - `zavora-gateway`: accepts orders and publishes workflow event
@@ -75,9 +76,22 @@ Services:
 - `postgres`: record system
 - `redis`: event transport
 
+Baseline functional coverage contract:
+1. Strategy-to-execution layer
+2. Business origination
+3. Order processing
+4. Inventory and procurement (for product flows)
+5. Finance and accounting
+6. Reporting and revenue tracking
+7. Governance and policy enforcement
+8. Agent autonomy and exception handling
+9. Audit and compliance evidence
+10. Agent payroll and cost allocation
+
 Important:
-- Microservices are an implementation design.
-- They do not replace the business/constitutional requirements.
+- Microservices are an implementation design to deliver these 10 functional units.
+- Agents execute work through approved skills and capability routing, not ad-hoc prompts.
+- Technical service uptime alone does not satisfy baseline completion; functional evidence for `1..10` is required.
 
 ## 5) Run and Validate the Current Baseline
 
@@ -132,16 +146,18 @@ For each run, verify:
 2. policy checks and exception paths,
 3. financial postings and settlement records,
 4. product/service cost capture,
-5. board KPI and variance movement.
+5. board KPI and variance movement,
+6. skill selection, skill execution outcomes, and skill-level evidence capture.
 
 ## 7) Documentation Map
 
 Primary documents:
-1. `/Users/jameskaranja/Developer/projects/zavora-erp/README.md`
-2. `/Users/jameskaranja/Developer/projects/zavora-erp/docs/functional-units.md`
-3. `/Users/jameskaranja/Developer/projects/zavora-erp/docs/roadmap.md`
-4. `/Users/jameskaranja/Developer/projects/zavora-erp/docs/spec-requirements.md`
-5. `/Users/jameskaranja/Developer/projects/zavora-erp/docs/spec-design-and-tasks.md`
+1. `README.md`
+2. `docs/functional-units.md`
+3. `docs/roadmap.md`
+4. `docs/spec-requirements.md`
+5. `docs/spec-design-and-tasks.md`
+6. `docs/sequence-diagrams-user-journeys.md`
 
 ## 8) Delivery Standard
 

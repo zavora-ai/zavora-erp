@@ -70,6 +70,12 @@
 - `FR-036 (P0)` Execute eligible workflows autonomously within mandate.
 - `FR-037 (P0)` Require human intervention only when policy triggers exception.
 - `FR-038 (P1)` Persist decision rationale for autonomous actions.
+- `FR-049 (P0)` Maintain a versioned skill registry for agent capabilities with ownership and approval status.
+- `FR-050 (P0)` Route agent intents to approved skills using capability mapping and policy context.
+- `FR-051 (P0)` Enforce schema-validated input/output contracts for every skill invocation.
+- `FR-052 (P1)` Support composed skill chains with deterministic handoff between skills.
+- `FR-053 (P0)` Trigger bounded retry, fallback skill, or escalation path on skill execution failure.
+- `FR-054 (P1)` Track skill effectiveness metrics (success, latency, intervention rate) by skill version.
 
 ### 2.9 FU-09 Audit and Compliance Evidence
 
@@ -77,6 +83,7 @@
 - `FR-040 (P0)` Provide order-level timeline from origination to settlement.
 - `FR-041 (P0)` Link commitment, obligation, proof, and settlement artifacts.
 - `FR-042 (P1)` Export audit evidence package per transaction or period.
+- `FR-055 (P0)` Persist skill invocation evidence (skill ID/version, input/output hash, result, actor) linked to proof records.
 
 ### 2.10 FU-10 Agent Payroll and Cost Allocation
 
@@ -86,6 +93,7 @@
 - `FR-046 (P0)` Allocate autonomous operating costs to workflow/order/period.
 - `FR-047 (P0)` Post payroll-cost accounting entries and reconcile with source costs.
 - `FR-048 (P1)` Report margin after autonomous operating costs.
+- `FR-056 (P1)` Allocate autonomous operating costs by skill invocation to support skill-level unit economics.
 
 ## 3. Non-Functional Requirements
 
@@ -126,6 +134,13 @@
 - `NFR-018 (P0)` Cost allocation must be deterministic for identical source inputs.
 - `NFR-019 (P1)` At least 99% of autonomous operating cost must be attributable.
 - `NFR-020 (P1)` Reconciliation variance between cost sources and payroll ledger must be below 0.5%.
+
+### 3.7 Skill Runtime Integrity
+
+- `NFR-021 (P0)` Only approved and version-pinned skills may execute in governed environments.
+- `NFR-022 (P0)` Every skill invocation must pass declared schema contract checks before execution.
+- `NFR-023 (P1)` Skill failures must resolve to retry, fallback, or escalation within configured SLA bounds.
+- `NFR-024 (P1)` Skill telemetry coverage must capture outcome and latency for at least 99% of invocations.
 
 ## 4. Acceptance Rule
 

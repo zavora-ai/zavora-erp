@@ -25,14 +25,14 @@ This document defines design specifications and delivery tasks mapped directly t
 - `DS-007` Governance control model (approval thresholds, escalation routing, freeze controls, governance decision logs).
   - Covers: `FR-032..FR-035`
 
-- `DS-008` Agent autonomy and exception model (mandate-aware autonomy, policy-triggered HITL, rationale persistence).
-  - Covers: `FR-036..FR-038`
+- `DS-008` Agent autonomy and skill-execution model (mandate-aware autonomy, capability routing, policy-triggered HITL, rationale persistence).
+  - Covers: `FR-036..FR-038`, `FR-049..FR-054`
 
-- `DS-009` Audit and compliance evidence model (immutable events, timeline replay, artifact linkage, evidence export).
-  - Covers: `FR-039..FR-042`
+- `DS-009` Audit and compliance evidence model (immutable events, timeline replay, artifact linkage, evidence export, skill-evidence linkage).
+  - Covers: `FR-039..FR-042`, `FR-055`
 
-- `DS-010` Agent payroll and cost-allocation model (token/cloud/subscription metering, allocation, payroll journals, margin views).
-  - Covers: `FR-043..FR-048`
+- `DS-010` Agent payroll and cost-allocation model (token/cloud/subscription metering, allocation, payroll journals, margin views, skill-level costing).
+  - Covers: `FR-043..FR-048`, `FR-056`
 
 - `DS-011` Event integrity and replay model (durability, idempotency, deterministic replay).
   - Covers: `NFR-001`, `NFR-002`, `NFR-004`
@@ -54,6 +54,9 @@ This document defines design specifications and delivery tasks mapped directly t
 
 - `DS-017` FinOps data quality model (daily ingestion completion, deterministic allocation, attribution and reconciliation thresholds).
   - Covers: `NFR-017..NFR-020`
+
+- `DS-018` Skill runtime governance model (approved versions, contract validation, fallback controls, telemetry coverage).
+  - Covers: `NFR-021..NFR-024`
 
 ## 2. Delivery Tasks
 
@@ -161,6 +164,19 @@ This document defines design specifications and delivery tasks mapped directly t
 - `TSK-070` Implement performance benchmark harness for intake, workflow, and board pack latency. (`DS-013`)
 - `TSK-071` Implement daily FinOps ingestion-completion and reconciliation monitors. (`DS-017`)
 
+### 2.12 Wave L - Skill Capability Platform
+
+- `TSK-072` Implement versioned skill registry with owner and approval state. (`DS-008`, `DS-018`)
+- `TSK-073` Implement capability-to-skill routing by intent and policy context. (`DS-008`)
+- `TSK-074` Implement schema contract validation for skill inputs and outputs. (`DS-008`, `DS-018`)
+- `TSK-075` Implement deterministic skill-chain composition and handoff controls. (`DS-008`)
+- `TSK-076` Implement skill failure controller (bounded retry, fallback skill, escalation). (`DS-008`, `DS-018`)
+- `TSK-077` Persist skill invocation evidence linked to proof records and transaction timelines. (`DS-009`)
+- `TSK-078` Extend cost allocation engine for skill-level unit economics. (`DS-010`, `DS-017`)
+- `TSK-079` Enforce approved/version-pinned skill execution in governed environments. (`DS-018`)
+- `TSK-080` Implement skill telemetry pipeline for outcome, latency, and intervention metrics. (`DS-018`)
+- `TSK-081` Add acceptance tests for skill runtime integrity controls and SLAs. (`DS-018`, `DS-016`)
+
 ## 3. Traceability Matrix
 
 ### 3.1 Functional Coverage
@@ -172,9 +188,9 @@ This document defines design specifications and delivery tasks mapped directly t
 - `FR-022..FR-026` -> `DS-005` -> `TSK-031..TSK-038`
 - `FR-027..FR-031` -> `DS-006` -> `TSK-039..TSK-043`
 - `FR-032..FR-035` -> `DS-007` -> `TSK-044..TSK-047`
-- `FR-036..FR-038` -> `DS-008` -> `TSK-048..TSK-051`
-- `FR-039..FR-042` -> `DS-009` -> `TSK-052..TSK-055`
-- `FR-043..FR-048` -> `DS-010` -> `TSK-056..TSK-061`
+- `FR-036..FR-038`, `FR-049..FR-054` -> `DS-008` -> `TSK-048..TSK-051`, `TSK-072..TSK-076`
+- `FR-039..FR-042`, `FR-055` -> `DS-009` -> `TSK-052..TSK-055`, `TSK-077`
+- `FR-043..FR-048`, `FR-056` -> `DS-010` -> `TSK-056..TSK-061`, `TSK-078`
 
 ### 3.2 Non-Functional Coverage
 
@@ -185,6 +201,7 @@ This document defines design specifications and delivery tasks mapped directly t
 - `NFR-011..NFR-013` -> `DS-015` -> `TSK-065..TSK-067`
 - `NFR-014..NFR-016` -> `DS-016` -> `TSK-068`, `TSK-069`
 - `NFR-017..NFR-020` -> `DS-017` -> `TSK-056..TSK-060`, `TSK-071`
+- `NFR-021..NFR-024` -> `DS-018` -> `TSK-072`, `TSK-074`, `TSK-076`, `TSK-079..TSK-081`
 
 ## 4. Execution Rules
 

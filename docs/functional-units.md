@@ -158,15 +158,20 @@ Maximize autonomous execution while preserving safe escalation.
 
 In scope:
 - Autonomous decisions within mandate
+- Skill-driven execution through approved capability packs
+- Skill selection and routing by intent, policy, and context
+- Skill fallback and escalation when execution confidence is low
 - Human-in-the-loop only for policy-triggered exceptions
 - Decision rationale persistence
 
 Outputs:
 - Autonomous execution trail
+- Skill invocation and outcome records
 - Exception queue outcomes
 
 KPIs:
 - Autonomous completion rate
+- Skill invocation success rate
 - Human intervention ratio
 
 ## FU-09 Audit and Compliance Evidence

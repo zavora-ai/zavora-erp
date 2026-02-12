@@ -25,10 +25,12 @@ Exit criteria:
 
 Scope:
 - Deliver FU-03 processing and FU-08 autonomy controls.
+- Implement skill registry, capability routing, and skill-chain execution for autonomous work.
 - Support product and service execution variants.
 
 Exit criteria:
 - Product and service scenario both complete autonomously unless policy requires escalation.
+- Agents execute through approved skills with measurable success and fallback behavior.
 
 ## RM-04 Product Operations (Inventory and Procurement)
 
@@ -52,6 +54,7 @@ Exit criteria:
 
 Scope:
 - Deliver FU-07 approvals/escalations/freeze.
+- Deliver governed skill approvals and version pinning for production execution.
 - Integrate policy checks into all execution paths.
 
 Exit criteria:
@@ -79,6 +82,7 @@ Exit criteria:
 
 Scope:
 - Deliver FU-10 token/cloud/subscription cost accounting.
+- Extend allocation to skill-level economics.
 - Integrate payroll economics into finance and board reporting.
 
 Exit criteria:
