@@ -181,6 +181,50 @@ curl -X POST http://localhost:8080/origination/quotes/QUOTE_ID/accept \
   }'
 ```
 
+Set governance threshold (example: service orders above 100 require approval):
+
+```bash
+curl -X POST http://localhost:8080/governance/thresholds \
+  -H 'content-type: application/json' \
+  -d '{
+    "action_type": "ORDER_EXECUTION_SERVICE",
+    "max_auto_amount": "100.00",
+    "currency": "USD",
+    "updated_by_agent_id": "board-agent"
+  }'
+```
+
+List pending governance escalations:
+
+```bash
+curl "http://localhost:8080/governance/escalations?status=PENDING&limit=20"
+```
+
+Approve an escalation (replace `ESCALATION_ID`):
+
+```bash
+curl -X POST http://localhost:8080/governance/escalations/ESCALATION_ID/decide \
+  -H 'content-type: application/json' \
+  -d '{
+    "decision": "APPROVED",
+    "decided_by_agent_id": "board-agent",
+    "decision_note": "approved for execution"
+  }'
+```
+
+Freeze or unfreeze an action type:
+
+```bash
+curl -X POST http://localhost:8080/governance/freeze \
+  -H 'content-type: application/json' \
+  -d '{
+    "action_type": "ORDER_EXECUTION_PRODUCT",
+    "is_frozen": true,
+    "reason": "temporary board hold",
+    "updated_by_agent_id": "board-agent"
+  }'
+```
+
 Create a direct transaction (bypassing origination):
 
 ```bash
@@ -249,7 +293,7 @@ curl -X POST http://localhost:8100/memory/search \
 Note:
 - Current baseline supports both product and service transactions.
 - Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
-- Board pack includes pipeline counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`) in addition to fulfillment and finance metrics.
+- Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
 
 ## 6) Functional Verification Evidence
 

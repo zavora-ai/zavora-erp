@@ -52,6 +52,7 @@ async fn board_pack(
             COUNT(*)::BIGINT AS orders_total,
             COUNT(*) FILTER (WHERE status = 'FULFILLED')::BIGINT AS orders_fulfilled,
             COUNT(*) FILTER (WHERE status <> 'FULFILLED')::BIGINT AS orders_open,
+            COUNT(*) FILTER (WHERE status = 'PENDING_APPROVAL')::BIGINT AS orders_pending_approval,
             COALESCE(SUM(CASE WHEN status = 'FULFILLED' THEN quantity * unit_price ELSE 0 END), 0) AS revenue
         FROM orders
         "#,
@@ -79,7 +80,8 @@ async fn board_pack(
             (SELECT COUNT(*)::BIGINT FROM leads) AS leads_total,
             (SELECT COUNT(*)::BIGINT FROM opportunities WHERE stage <> 'ACCEPTED' AND stage <> 'LOST') AS opportunities_open,
             (SELECT COUNT(*)::BIGINT FROM quotes WHERE status = 'ISSUED') AS quotes_issued,
-            (SELECT COUNT(*)::BIGINT FROM quotes WHERE status = 'ACCEPTED') AS quotes_accepted
+            (SELECT COUNT(*)::BIGINT FROM quotes WHERE status = 'ACCEPTED') AS quotes_accepted,
+            (SELECT COUNT(*)::BIGINT FROM governance_escalations WHERE status = 'PENDING') AS governance_escalations_pending
         "#,
     )
     .fetch_one(&state.pool)
@@ -97,6 +99,9 @@ async fn board_pack(
         orders_open: totals
             .try_get::<i64, _>("orders_open")
             .map_err(internal_error)?,
+        orders_pending_approval: totals
+            .try_get::<i64, _>("orders_pending_approval")
+            .map_err(internal_error)?,
         leads_total: pipeline
             .try_get::<i64, _>("leads_total")
             .map_err(internal_error)?,
@@ -108,6 +113,9 @@ async fn board_pack(
             .map_err(internal_error)?,
         quotes_accepted: pipeline
             .try_get::<i64, _>("quotes_accepted")
+            .map_err(internal_error)?,
+        governance_escalations_pending: pipeline
+            .try_get::<i64, _>("governance_escalations_pending")
             .map_err(internal_error)?,
         revenue: totals
             .try_get::<Decimal, _>("revenue")

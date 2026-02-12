@@ -120,6 +120,44 @@ CREATE INDEX IF NOT EXISTS idx_quote_acceptances_quote_id ON quote_acceptances(q
 CREATE INDEX IF NOT EXISTS idx_quote_acceptances_order_id ON quote_acceptances(order_id);
 CREATE INDEX IF NOT EXISTS idx_quote_acceptances_accepted_at ON quote_acceptances(accepted_at);
 
+CREATE TABLE IF NOT EXISTS governance_thresholds (
+    action_type TEXT PRIMARY KEY,
+    max_auto_amount NUMERIC(20, 4) NOT NULL CHECK (max_auto_amount > 0),
+    currency TEXT NOT NULL DEFAULT 'USD',
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_by_agent_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS governance_freeze_controls (
+    action_type TEXT PRIMARY KEY,
+    is_frozen BOOLEAN NOT NULL DEFAULT FALSE,
+    reason TEXT,
+    updated_by_agent_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS governance_escalations (
+    id UUID PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    reference_type TEXT NOT NULL,
+    reference_id UUID NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'FROZEN')),
+    reason_code TEXT NOT NULL,
+    amount NUMERIC(20, 4) NOT NULL CHECK (amount >= 0),
+    currency TEXT NOT NULL,
+    requested_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    decided_at TIMESTAMPTZ,
+    decided_by_agent_id TEXT,
+    decision_note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_governance_escalations_status_created
+    ON governance_escalations(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_governance_escalations_reference
+    ON governance_escalations(reference_type, reference_id);
+
 CREATE TABLE IF NOT EXISTS inventory_positions (
     item_code TEXT PRIMARY KEY,
     on_hand NUMERIC(20, 4) NOT NULL,
@@ -192,3 +230,19 @@ VALUES
     ('SKU-001', 25.0000, 18.5000, NOW()),
     ('SKU-002', 10.0000, 42.0000, NOW())
 ON CONFLICT (item_code) DO NOTHING;
+
+INSERT INTO governance_thresholds(
+    action_type, max_auto_amount, currency, active, updated_by_agent_id, updated_at
+)
+VALUES
+    ('ORDER_EXECUTION_PRODUCT', 5000.0000, 'USD', TRUE, 'board-agent', NOW()),
+    ('ORDER_EXECUTION_SERVICE', 5000.0000, 'USD', TRUE, 'board-agent', NOW())
+ON CONFLICT (action_type) DO NOTHING;
+
+INSERT INTO governance_freeze_controls(
+    action_type, is_frozen, reason, updated_by_agent_id, updated_at
+)
+VALUES
+    ('ORDER_EXECUTION_PRODUCT', FALSE, NULL, 'board-agent', NOW()),
+    ('ORDER_EXECUTION_SERVICE', FALSE, NULL, 'board-agent', NOW())
+ON CONFLICT (action_type) DO NOTHING;

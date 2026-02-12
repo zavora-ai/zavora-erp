@@ -3,12 +3,13 @@ use std::net::SocketAddr;
 use anyhow::Result as AnyResult;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use tracing::{error, info};
@@ -33,10 +34,96 @@ const REGISTERED_AGENT_IDS: [&str; 10] = [
     "payroll-agent",
 ];
 
+const GOVERNANCE_ACTOR_IDS: [&str; 3] = ["board-agent", "strategy-agent", "controller-agent"];
+const ACTION_ORDER_EXECUTION_PRODUCT: &str = "ORDER_EXECUTION_PRODUCT";
+const ACTION_ORDER_EXECUTION_SERVICE: &str = "ORDER_EXECUTION_SERVICE";
+
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
     redis: RedisBus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetThresholdRequest {
+    action_type: String,
+    max_auto_amount: Decimal,
+    currency: Option<String>,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetThresholdResponse {
+    action_type: String,
+    max_auto_amount: Decimal,
+    currency: String,
+    active: bool,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetFreezeRequest {
+    action_type: String,
+    is_frozen: bool,
+    reason: Option<String>,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetFreezeResponse {
+    action_type: String,
+    is_frozen: bool,
+    reason: Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListEscalationsQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GovernanceEscalationView {
+    escalation_id: Uuid,
+    action_type: String,
+    reference_type: String,
+    reference_id: Uuid,
+    status: String,
+    reason_code: String,
+    amount: Decimal,
+    currency: String,
+    requested_by_agent_id: String,
+    created_at: DateTime<Utc>,
+    decided_at: Option<DateTime<Utc>>,
+    decided_by_agent_id: Option<String>,
+    decision_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GovernanceEscalationListResponse {
+    items: Vec<GovernanceEscalationView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DecideEscalationRequest {
+    decision: String,
+    decided_by_agent_id: String,
+    decision_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DecideEscalationResponse {
+    escalation_id: Uuid,
+    status: String,
+    order_id: Option<Uuid>,
+    dispatched: bool,
+}
+
+struct PolicyGateResult {
+    is_frozen: bool,
+    freeze_reason: Option<String>,
+    requires_escalation: bool,
 }
 
 #[tokio::main]
@@ -60,6 +147,13 @@ async fn main() -> AnyResult<()> {
         .route("/origination/opportunities", post(create_opportunity))
         .route("/origination/quotes", post(create_quote))
         .route("/origination/quotes/{quote_id}/accept", post(accept_quote))
+        .route("/governance/thresholds", post(set_threshold))
+        .route("/governance/freeze", post(set_freeze))
+        .route("/governance/escalations", get(list_escalations))
+        .route(
+            "/governance/escalations/{escalation_id}/decide",
+            post(decide_escalation),
+        )
         .with_state(state);
 
     let addr: SocketAddr = config.http_addr.parse()?;
@@ -442,6 +536,30 @@ async fn accept_quote(
     let unit_price: Decimal = quote_row.try_get("unit_price").map_err(internal_error)?;
     let currency: String = quote_row.try_get("currency").map_err(internal_error)?;
 
+    let action_type = action_type_for_transaction(&transaction_type);
+    let amount = (quantity * unit_price).round_dp(4);
+    let policy = evaluate_policy_gate(&mut tx, action_type, amount)
+        .await
+        .map_err(internal_error)?;
+
+    if policy.is_frozen {
+        return Err((
+            StatusCode::LOCKED,
+            format!(
+                "action frozen by governance: {}",
+                policy
+                    .freeze_reason
+                    .unwrap_or_else(|| "no reason provided".to_string())
+            ),
+        ));
+    }
+
+    let order_status = if policy.requires_escalation {
+        "PENDING_APPROVAL"
+    } else {
+        "NEW"
+    };
+
     let order_id = Uuid::new_v4();
     let acceptance_id = Uuid::new_v4();
 
@@ -450,7 +568,7 @@ async fn accept_quote(
         INSERT INTO orders (
             id, customer_email, transaction_type, requested_by_agent_id, item_code, quantity, unit_price, currency, status, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'NEW', $9, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         "#,
     )
     .bind(order_id)
@@ -460,7 +578,8 @@ async fn accept_quote(
     .bind(item_code)
     .bind(quantity)
     .bind(unit_price)
-    .bind(currency)
+    .bind(&currency)
+    .bind(order_status)
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -502,9 +621,30 @@ async fn accept_quote(
         .await
         .map_err(internal_error)?;
 
+    let escalation_id = if policy.requires_escalation {
+        Some(
+            insert_escalation(
+                &mut tx,
+                action_type,
+                "ORDER",
+                order_id,
+                "AMOUNT_THRESHOLD_EXCEEDED",
+                amount,
+                &currency,
+                &requested_by_agent_id,
+            )
+            .await
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+
     tx.commit().await.map_err(internal_error)?;
 
-    dispatch_order_event(&state, order_id).await?;
+    if escalation_id.is_none() {
+        dispatch_order_event(&state, order_id).await?;
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -513,7 +653,12 @@ async fn accept_quote(
             opportunity_id,
             acceptance_id,
             order_id,
-            status: "ORDER_ACCEPTED".to_string(),
+            status: if escalation_id.is_some() {
+                "ORDER_PENDING_APPROVAL".to_string()
+            } else {
+                "ORDER_ACCEPTED".to_string()
+            },
+            escalation_id,
         }),
     ))
 }
@@ -525,15 +670,40 @@ async fn create_order(
     let (transaction_type, requested_by_agent_id) =
         validate_order_request(&payload).map_err(invalid_request)?;
 
+    let action_type = action_type_for_transaction(&transaction_type);
+    let amount = (payload.quantity * payload.unit_price).round_dp(4);
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+    let policy = evaluate_policy_gate(&mut tx, action_type, amount)
+        .await
+        .map_err(internal_error)?;
+
+    if policy.is_frozen {
+        return Err((
+            StatusCode::LOCKED,
+            format!(
+                "action frozen by governance: {}",
+                policy
+                    .freeze_reason
+                    .unwrap_or_else(|| "no reason provided".to_string())
+            ),
+        ));
+    }
+
     let order_id = Uuid::new_v4();
     let now = Utc::now();
+    let order_status = if policy.requires_escalation {
+        "PENDING_APPROVAL"
+    } else {
+        "NEW"
+    };
 
     if let Err(err) = sqlx::query(
         r#"
         INSERT INTO orders (
             id, customer_email, transaction_type, requested_by_agent_id, item_code, quantity, unit_price, currency, status, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'NEW', $9, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         "#,
     )
     .bind(order_id)
@@ -544,8 +714,9 @@ async fn create_order(
     .bind(payload.quantity)
     .bind(payload.unit_price)
     .bind(payload.currency.trim())
+    .bind(order_status)
     .bind(now)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     {
         error!("failed to insert order: {err}");
@@ -555,16 +726,440 @@ async fn create_order(
         ));
     }
 
-    dispatch_order_event(&state, order_id).await?;
+    let escalation_id = if policy.requires_escalation {
+        Some(
+            insert_escalation(
+                &mut tx,
+                action_type,
+                "ORDER",
+                order_id,
+                "AMOUNT_THRESHOLD_EXCEEDED",
+                amount,
+                payload.currency.trim(),
+                &requested_by_agent_id,
+            )
+            .await
+            .map_err(internal_error)?,
+        )
+    } else {
+        None
+    };
+
+    tx.commit().await.map_err(internal_error)?;
+
+    if escalation_id.is_none() {
+        dispatch_order_event(&state, order_id).await?;
+    }
 
     let response = CreateOrderResponse {
         order_id,
-        status: "ACCEPTED".to_string(),
+        status: if escalation_id.is_some() {
+            "PENDING_APPROVAL".to_string()
+        } else {
+            "ACCEPTED".to_string()
+        },
         transaction_type,
         requested_by_agent_id,
+        escalation_id,
     };
 
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn set_threshold(
+    State(state): State<AppState>,
+    Json(payload): Json<SetThresholdRequest>,
+) -> Result<Json<SetThresholdResponse>, (StatusCode, String)> {
+    let actor = validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if payload.max_auto_amount <= Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_auto_amount must be positive".to_string(),
+        ));
+    }
+
+    let action_type = normalize_action_type(&payload.action_type)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let currency = payload
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("USD")
+        .to_ascii_uppercase();
+
+    let now = Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO governance_thresholds (
+            action_type, max_auto_amount, currency, active, updated_by_agent_id, updated_at
+        )
+        VALUES ($1, $2, $3, TRUE, $4, $5)
+        ON CONFLICT (action_type)
+        DO UPDATE SET
+            max_auto_amount = EXCLUDED.max_auto_amount,
+            currency = EXCLUDED.currency,
+            active = TRUE,
+            updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(&action_type)
+    .bind(payload.max_auto_amount)
+    .bind(&currency)
+    .bind(&actor)
+    .bind(now)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(SetThresholdResponse {
+        action_type,
+        max_auto_amount: payload.max_auto_amount,
+        currency,
+        active: true,
+        updated_at: now,
+    }))
+}
+
+async fn set_freeze(
+    State(state): State<AppState>,
+    Json(payload): Json<SetFreezeRequest>,
+) -> Result<Json<SetFreezeResponse>, (StatusCode, String)> {
+    let actor = validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let action_type = normalize_action_type(&payload.action_type)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let reason = payload
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let now = Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO governance_freeze_controls (
+            action_type, is_frozen, reason, updated_by_agent_id, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (action_type)
+        DO UPDATE SET
+            is_frozen = EXCLUDED.is_frozen,
+            reason = EXCLUDED.reason,
+            updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(&action_type)
+    .bind(payload.is_frozen)
+    .bind(&reason)
+    .bind(&actor)
+    .bind(now)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(SetFreezeResponse {
+        action_type,
+        is_frozen: payload.is_frozen,
+        reason,
+        updated_at: now,
+    }))
+}
+
+async fn list_escalations(
+    State(state): State<AppState>,
+    Query(query): Query<ListEscalationsQuery>,
+) -> Result<Json<GovernanceEscalationListResponse>, (StatusCode, String)> {
+    let status_filter = query
+        .status
+        .as_deref()
+        .map(normalize_decision_status)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            action_type,
+            reference_type,
+            reference_id,
+            status,
+            reason_code,
+            amount,
+            currency,
+            requested_by_agent_id,
+            created_at,
+            decided_at,
+            decided_by_agent_id,
+            decision_note
+        FROM governance_escalations
+        WHERE ($1::text IS NULL OR status = $1)
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(status_filter)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(GovernanceEscalationView {
+            escalation_id: row.try_get("id").map_err(internal_error)?,
+            action_type: row.try_get("action_type").map_err(internal_error)?,
+            reference_type: row.try_get("reference_type").map_err(internal_error)?,
+            reference_id: row.try_get("reference_id").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            reason_code: row.try_get("reason_code").map_err(internal_error)?,
+            amount: row.try_get("amount").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            requested_by_agent_id: row
+                .try_get("requested_by_agent_id")
+                .map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            decided_at: row.try_get("decided_at").map_err(internal_error)?,
+            decided_by_agent_id: row.try_get("decided_by_agent_id").map_err(internal_error)?,
+            decision_note: row.try_get("decision_note").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(GovernanceEscalationListResponse { items }))
+}
+
+async fn decide_escalation(
+    State(state): State<AppState>,
+    Path(escalation_id): Path<Uuid>,
+    Json(payload): Json<DecideEscalationRequest>,
+) -> Result<Json<DecideEscalationResponse>, (StatusCode, String)> {
+    let decided_by_agent_id = validate_governance_actor(&payload.decided_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let decision = normalize_decision_status(&payload.decision)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let now = Utc::now();
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+
+    let escalation_row = sqlx::query(
+        r#"
+        SELECT action_type, reference_type, reference_id, status
+        FROM governance_escalations
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(escalation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let Some(escalation_row) = escalation_row else {
+        return Err((StatusCode::NOT_FOUND, "escalation not found".to_string()));
+    };
+
+    let action_type: String = escalation_row
+        .try_get("action_type")
+        .map_err(internal_error)?;
+    let reference_type: String = escalation_row
+        .try_get("reference_type")
+        .map_err(internal_error)?;
+    let reference_id: Uuid = escalation_row
+        .try_get("reference_id")
+        .map_err(internal_error)?;
+    let current_status: String = escalation_row.try_get("status").map_err(internal_error)?;
+
+    if current_status != "PENDING" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("escalation already decided with status {current_status}"),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE governance_escalations
+        SET status = $2, decided_at = $3, decided_by_agent_id = $4, decision_note = $5
+        WHERE id = $1
+        "#,
+    )
+    .bind(escalation_id)
+    .bind(&decision)
+    .bind(now)
+    .bind(&decided_by_agent_id)
+    .bind(payload.decision_note.as_deref().map(str::trim))
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let mut order_id: Option<Uuid> = None;
+    let mut dispatch_required = false;
+
+    if reference_type == "ORDER" {
+        order_id = Some(reference_id);
+        match decision.as_str() {
+            "APPROVED" => {
+                let updated = sqlx::query(
+                    "UPDATE orders SET status = 'NEW', updated_at = $2 WHERE id = $1 AND status = 'PENDING_APPROVAL'",
+                )
+                .bind(reference_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+
+                if updated.rows_affected() == 0 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "order is not in PENDING_APPROVAL status".to_string(),
+                    ));
+                }
+                dispatch_required = true;
+            }
+            "REJECTED" => {
+                sqlx::query(
+                    "UPDATE orders SET status = 'FAILED', failure_reason = 'governance_rejected', updated_at = $2 WHERE id = $1",
+                )
+                .bind(reference_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+            }
+            "FROZEN" => {
+                sqlx::query(
+                    "UPDATE orders SET status = 'FROZEN', failure_reason = 'governance_frozen', updated_at = $2 WHERE id = $1",
+                )
+                .bind(reference_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO governance_freeze_controls (
+                        action_type, is_frozen, reason, updated_by_agent_id, updated_at
+                    )
+                    VALUES ($1, TRUE, $2, $3, $4)
+                    ON CONFLICT (action_type)
+                    DO UPDATE SET
+                        is_frozen = TRUE,
+                        reason = EXCLUDED.reason,
+                        updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+                        updated_at = EXCLUDED.updated_at
+                    "#,
+                )
+                .bind(&action_type)
+                .bind(payload.decision_note.as_deref().map(str::trim))
+                .bind(&decided_by_agent_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal_error)?;
+            }
+            _ => {
+                return Err((StatusCode::BAD_REQUEST, "unsupported decision".to_string()));
+            }
+        }
+    }
+
+    tx.commit().await.map_err(internal_error)?;
+
+    if dispatch_required {
+        if let Some(approved_order_id) = order_id {
+            dispatch_order_event(&state, approved_order_id).await?;
+        }
+    }
+
+    Ok(Json(DecideEscalationResponse {
+        escalation_id,
+        status: decision,
+        order_id,
+        dispatched: dispatch_required,
+    }))
+}
+
+async fn evaluate_policy_gate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action_type: &str,
+    amount: Decimal,
+) -> AnyResult<PolicyGateResult> {
+    let freeze_row = sqlx::query(
+        "SELECT is_frozen, reason FROM governance_freeze_controls WHERE action_type = $1",
+    )
+    .bind(action_type)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let (is_frozen, freeze_reason) = if let Some(row) = freeze_row {
+        (
+            row.try_get::<bool, _>("is_frozen")?,
+            row.try_get::<Option<String>, _>("reason")?,
+        )
+    } else {
+        (false, None)
+    };
+
+    let max_auto_amount = sqlx::query_scalar::<_, Decimal>(
+        "SELECT max_auto_amount FROM governance_thresholds WHERE action_type = $1 AND active = TRUE",
+    )
+    .bind(action_type)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or_else(default_auto_approval_limit);
+
+    Ok(PolicyGateResult {
+        is_frozen,
+        freeze_reason,
+        requires_escalation: amount > max_auto_amount,
+    })
+}
+
+async fn insert_escalation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action_type: &str,
+    reference_type: &str,
+    reference_id: Uuid,
+    reason_code: &str,
+    amount: Decimal,
+    currency: &str,
+    requested_by_agent_id: &str,
+) -> AnyResult<Uuid> {
+    let escalation_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO governance_escalations (
+            id, action_type, reference_type, reference_id, status, reason_code,
+            amount, currency, requested_by_agent_id, created_at
+        )
+        VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(escalation_id)
+    .bind(action_type)
+    .bind(reference_type)
+    .bind(reference_id)
+    .bind(reason_code)
+    .bind(amount)
+    .bind(currency)
+    .bind(requested_by_agent_id)
+    .bind(Utc::now())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(escalation_id)
 }
 
 async fn dispatch_order_event(
@@ -630,12 +1225,52 @@ fn validate_agent_id(agent_id: &str) -> AnyResult<String> {
     Ok(normalized)
 }
 
+fn validate_governance_actor(agent_id: &str) -> AnyResult<String> {
+    let normalized = validate_agent_id(agent_id)?;
+    if !GOVERNANCE_ACTOR_IDS
+        .iter()
+        .any(|registered| *registered == normalized.as_str())
+    {
+        anyhow::bail!("agent is not authorized for governance decisions");
+    }
+
+    Ok(normalized)
+}
+
+fn action_type_for_transaction(transaction_type: &str) -> &'static str {
+    if transaction_type == "SERVICE" {
+        ACTION_ORDER_EXECUTION_SERVICE
+    } else {
+        ACTION_ORDER_EXECUTION_PRODUCT
+    }
+}
+
 fn normalize_transaction_type(value: &str) -> AnyResult<String> {
     let normalized = value.trim().to_ascii_uppercase();
     match normalized.as_str() {
         "PRODUCT" | "SERVICE" => Ok(normalized),
         _ => anyhow::bail!("transaction_type must be PRODUCT or SERVICE"),
     }
+}
+
+fn normalize_action_type(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        ACTION_ORDER_EXECUTION_PRODUCT | ACTION_ORDER_EXECUTION_SERVICE => Ok(normalized),
+        _ => anyhow::bail!("unsupported action_type"),
+    }
+}
+
+fn normalize_decision_status(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "PENDING" | "APPROVED" | "REJECTED" | "FROZEN" => Ok(normalized),
+        _ => anyhow::bail!("status must be one of PENDING, APPROVED, REJECTED, FROZEN"),
+    }
+}
+
+fn default_auto_approval_limit() -> Decimal {
+    Decimal::new(100000000, 2) // 1,000,000.00
 }
 
 fn invalid_request(err: anyhow::Error) -> (StatusCode, String) {

@@ -92,6 +92,7 @@ pub struct AcceptQuoteResponse {
     pub acceptance_id: Uuid,
     pub order_id: Uuid,
     pub status: String,
+    pub escalation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ pub struct CreateOrderResponse {
     pub status: String,
     pub transaction_type: String,
     pub requested_by_agent_id: String,
+    pub escalation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,10 +122,12 @@ pub struct BoardPack {
     pub orders_total: i64,
     pub orders_fulfilled: i64,
     pub orders_open: i64,
+    pub orders_pending_approval: i64,
     pub leads_total: i64,
     pub opportunities_open: i64,
     pub quotes_issued: i64,
     pub quotes_accepted: i64,
+    pub governance_escalations_pending: i64,
     pub revenue: Decimal,
     pub cash_collected: Decimal,
     pub inventory_value: Decimal,
