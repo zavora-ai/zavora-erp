@@ -263,6 +263,12 @@ Read board pack:
 curl http://localhost:8090/board/pack
 ```
 
+Read audit evidence package for an order (replace `ORDER_ID`):
+
+```bash
+curl http://localhost:8090/audit/orders/ORDER_ID/evidence
+```
+
 Write semantic memory example:
 
 ```bash
@@ -294,6 +300,7 @@ Note:
 - Current baseline supports both product and service transactions.
 - Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
 - Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
+- Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order.
 
 ## 6) Functional Verification Evidence
 

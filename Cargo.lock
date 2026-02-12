@@ -2698,10 +2698,12 @@ dependencies = [
  "axum",
  "chrono",
  "rust_decimal",
+ "serde",
  "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zavora-platform",
 ]
 
