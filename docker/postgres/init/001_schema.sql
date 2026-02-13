@@ -158,6 +158,113 @@ CREATE INDEX IF NOT EXISTS idx_governance_escalations_status_created
 CREATE INDEX IF NOT EXISTS idx_governance_escalations_reference
     ON governance_escalations(reference_type, reference_id);
 
+CREATE TABLE IF NOT EXISTS strategy_offerings (
+    id UUID PRIMARY KEY,
+    offering_code TEXT NOT NULL UNIQUE,
+    offering_type TEXT NOT NULL CHECK (offering_type IN ('PRODUCT', 'SERVICE')),
+    name TEXT NOT NULL,
+    unit_of_measure TEXT NOT NULL,
+    default_unit_price NUMERIC(20, 4),
+    currency TEXT NOT NULL DEFAULT 'USD',
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    owner_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (default_unit_price IS NULL OR default_unit_price >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_offerings_type_active
+    ON strategy_offerings(offering_type, active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_kpi_targets (
+    id UUID PRIMARY KEY,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    business_unit TEXT NOT NULL,
+    mandate TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    target_value NUMERIC(20, 4) NOT NULL CHECK (target_value >= 0),
+    warning_threshold_pct NUMERIC(20, 4) NOT NULL CHECK (warning_threshold_pct >= 0),
+    critical_threshold_pct NUMERIC(20, 4) NOT NULL CHECK (critical_threshold_pct >= warning_threshold_pct),
+    currency TEXT NOT NULL DEFAULT 'USD',
+    updated_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (period_end >= period_start),
+    UNIQUE (period_start, period_end, business_unit, mandate, metric_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_kpi_targets_period
+    ON strategy_kpi_targets(period_start DESC, period_end DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_kpi_targets_dimension
+    ON strategy_kpi_targets(business_unit, mandate, metric_name);
+
+CREATE TABLE IF NOT EXISTS strategy_forecasts (
+    id UUID PRIMARY KEY,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    business_unit TEXT NOT NULL,
+    mandate TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    forecast_value NUMERIC(20, 4) NOT NULL CHECK (forecast_value >= 0),
+    confidence_pct NUMERIC(20, 4) CHECK (confidence_pct >= 0 AND confidence_pct <= 100),
+    assumptions_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    generated_by_agent_id TEXT NOT NULL,
+    generated_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (period_end >= period_start),
+    UNIQUE (period_start, period_end, business_unit, mandate, metric_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_forecasts_period
+    ON strategy_forecasts(period_start DESC, period_end DESC, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_forecasts_dimension
+    ON strategy_forecasts(business_unit, mandate, metric_name);
+
+CREATE TABLE IF NOT EXISTS strategy_variances (
+    id UUID PRIMARY KEY,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    business_unit TEXT NOT NULL,
+    mandate TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    target_value NUMERIC(20, 4) NOT NULL CHECK (target_value >= 0),
+    actual_value NUMERIC(20, 4) NOT NULL CHECK (actual_value >= 0),
+    forecast_value NUMERIC(20, 4),
+    variance_amount NUMERIC(20, 4) NOT NULL CHECK (variance_amount >= 0),
+    variance_pct NUMERIC(20, 4) NOT NULL CHECK (variance_pct >= 0),
+    severity TEXT NOT NULL CHECK (severity IN ('ON_TRACK', 'WARNING', 'BREACH')),
+    evaluated_by_agent_id TEXT NOT NULL,
+    evaluated_at TIMESTAMPTZ NOT NULL,
+    notes TEXT,
+    CHECK (period_end >= period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_variances_period
+    ON strategy_variances(period_start DESC, period_end DESC, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_variances_dimension
+    ON strategy_variances(business_unit, mandate, metric_name, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_variances_severity
+    ON strategy_variances(severity, evaluated_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_corrective_actions (
+    id UUID PRIMARY KEY,
+    variance_id UUID NOT NULL REFERENCES strategy_variances(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+    reason_code TEXT NOT NULL,
+    action_note TEXT,
+    linked_escalation_id UUID REFERENCES governance_escalations(id),
+    created_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    closed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_corrective_actions_status_created
+    ON strategy_corrective_actions(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_corrective_actions_variance
+    ON strategy_corrective_actions(variance_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS inventory_positions (
     item_code TEXT PRIMARY KEY,
     on_hand NUMERIC(20, 4) NOT NULL,
@@ -281,6 +388,144 @@ VALUES
     ('ORDER_EXECUTION_PRODUCT', FALSE, NULL, 'board-agent', NOW()),
     ('ORDER_EXECUTION_SERVICE', FALSE, NULL, 'board-agent', NOW())
 ON CONFLICT (action_type) DO NOTHING;
+
+INSERT INTO strategy_offerings(
+    id,
+    offering_code,
+    offering_type,
+    name,
+    unit_of_measure,
+    default_unit_price,
+    currency,
+    active,
+    owner_agent_id,
+    created_at,
+    updated_at
+)
+VALUES
+    (
+        uuid_generate_v4(),
+        'SKU-001',
+        'PRODUCT',
+        'Starter Product Bundle',
+        'UNIT',
+        55.0000,
+        'USD',
+        TRUE,
+        'strategy-agent',
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        'SVC-IMPLEMENTATION',
+        'SERVICE',
+        'Implementation Service Package',
+        'ENGAGEMENT',
+        1100.0000,
+        'USD',
+        TRUE,
+        'strategy-agent',
+        NOW(),
+        NOW()
+    )
+ON CONFLICT (offering_code) DO NOTHING;
+
+INSERT INTO strategy_kpi_targets(
+    id,
+    period_start,
+    period_end,
+    business_unit,
+    mandate,
+    metric_name,
+    target_value,
+    warning_threshold_pct,
+    critical_threshold_pct,
+    currency,
+    updated_by_agent_id,
+    created_at,
+    updated_at
+)
+VALUES
+    (
+        uuid_generate_v4(),
+        date_trunc('month', NOW())::date,
+        (date_trunc('month', NOW()) + interval '1 month - 1 day')::date,
+        'GLOBAL',
+        'GROWTH',
+        'REVENUE',
+        10000.0000,
+        5.0000,
+        10.0000,
+        'USD',
+        'strategy-agent',
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        date_trunc('month', NOW())::date,
+        (date_trunc('month', NOW()) + interval '1 month - 1 day')::date,
+        'GLOBAL',
+        'GROWTH',
+        'CASH',
+        8000.0000,
+        5.0000,
+        10.0000,
+        'USD',
+        'strategy-agent',
+        NOW(),
+        NOW()
+    )
+ON CONFLICT (period_start, period_end, business_unit, mandate, metric_name) DO NOTHING;
+
+INSERT INTO strategy_forecasts(
+    id,
+    period_start,
+    period_end,
+    business_unit,
+    mandate,
+    metric_name,
+    forecast_value,
+    confidence_pct,
+    assumptions_json,
+    currency,
+    generated_by_agent_id,
+    generated_at,
+    updated_at
+)
+VALUES
+    (
+        uuid_generate_v4(),
+        date_trunc('month', NOW())::date,
+        (date_trunc('month', NOW()) + interval '1 month - 1 day')::date,
+        'GLOBAL',
+        'GROWTH',
+        'REVENUE',
+        9500.0000,
+        82.5000,
+        '{"driver":"pipeline-weighted", "seasonality":"neutral"}'::jsonb,
+        'USD',
+        'strategy-agent',
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        date_trunc('month', NOW())::date,
+        (date_trunc('month', NOW()) + interval '1 month - 1 day')::date,
+        'GLOBAL',
+        'GROWTH',
+        'CASH',
+        7800.0000,
+        80.0000,
+        '{"driver":"collections-curve"}'::jsonb,
+        'USD',
+        'strategy-agent',
+        NOW(),
+        NOW()
+    )
+ON CONFLICT (period_start, period_end, business_unit, mandate, metric_name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS finops_token_usage (
     id UUID PRIMARY KEY,

@@ -10,10 +10,10 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -296,6 +296,228 @@ struct ListSkillRoutingQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpsertStrategyOfferingRequest {
+    offering_code: String,
+    offering_type: String,
+    name: String,
+    unit_of_measure: String,
+    default_unit_price: Option<Decimal>,
+    currency: Option<String>,
+    active: Option<bool>,
+    owner_agent_id: String,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StrategyOfferingView {
+    id: Uuid,
+    offering_code: String,
+    offering_type: String,
+    name: String,
+    unit_of_measure: String,
+    default_unit_price: Option<Decimal>,
+    currency: String,
+    active: bool,
+    owner_agent_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListStrategyOfferingsQuery {
+    offering_type: Option<String>,
+    active: Option<bool>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListStrategyOfferingsResponse {
+    items: Vec<StrategyOfferingView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpsertKpiTargetRequest {
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    target_value: Decimal,
+    warning_threshold_pct: Option<Decimal>,
+    critical_threshold_pct: Option<Decimal>,
+    currency: Option<String>,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KpiTargetView {
+    id: Uuid,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    target_value: Decimal,
+    warning_threshold_pct: Decimal,
+    critical_threshold_pct: Decimal,
+    currency: String,
+    updated_by_agent_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListKpiTargetsQuery {
+    period_start: Option<NaiveDate>,
+    period_end: Option<NaiveDate>,
+    business_unit: Option<String>,
+    mandate: Option<String>,
+    metric_name: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListKpiTargetsResponse {
+    items: Vec<KpiTargetView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpsertForecastRequest {
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    forecast_value: Decimal,
+    confidence_pct: Option<Decimal>,
+    assumptions_json: Option<Value>,
+    currency: Option<String>,
+    generated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ForecastView {
+    id: Uuid,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    forecast_value: Decimal,
+    confidence_pct: Option<Decimal>,
+    assumptions_json: Value,
+    currency: String,
+    generated_by_agent_id: String,
+    generated_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListForecastsQuery {
+    period_start: Option<NaiveDate>,
+    period_end: Option<NaiveDate>,
+    business_unit: Option<String>,
+    mandate: Option<String>,
+    metric_name: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListForecastsResponse {
+    items: Vec<ForecastView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvaluateVarianceRequest {
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    actual_value: Option<Decimal>,
+    notes: Option<String>,
+    requested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvaluateVarianceResponse {
+    variance_id: Uuid,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    target_value: Decimal,
+    actual_value: Decimal,
+    forecast_value: Option<Decimal>,
+    variance_amount: Decimal,
+    variance_pct: Decimal,
+    severity: String,
+    corrective_action_id: Option<Uuid>,
+    escalation_id: Option<Uuid>,
+    evaluated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StrategyVarianceView {
+    id: Uuid,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    business_unit: String,
+    mandate: String,
+    metric_name: String,
+    target_value: Decimal,
+    actual_value: Decimal,
+    forecast_value: Option<Decimal>,
+    variance_amount: Decimal,
+    variance_pct: Decimal,
+    severity: String,
+    evaluated_by_agent_id: String,
+    evaluated_at: DateTime<Utc>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListVariancesQuery {
+    period_start: Option<NaiveDate>,
+    period_end: Option<NaiveDate>,
+    business_unit: Option<String>,
+    mandate: Option<String>,
+    metric_name: Option<String>,
+    severity: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListVariancesResponse {
+    items: Vec<StrategyVarianceView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StrategyCorrectiveActionView {
+    id: Uuid,
+    variance_id: Uuid,
+    status: String,
+    reason_code: String,
+    action_note: Option<String>,
+    linked_escalation_id: Option<Uuid>,
+    created_by_agent_id: String,
+    created_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListCorrectiveActionsQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListCorrectiveActionsResponse {
+    items: Vec<StrategyCorrectiveActionView>,
+}
+
 #[derive(Debug, Clone)]
 struct FulfilledOrder {
     order_id: Uuid,
@@ -340,6 +562,27 @@ async fn main() -> AnyResult<()> {
         .route("/origination/opportunities", post(create_opportunity))
         .route("/origination/quotes", post(create_quote))
         .route("/origination/quotes/{quote_id}/accept", post(accept_quote))
+        .route(
+            "/strategy/offerings",
+            get(list_strategy_offerings).post(upsert_strategy_offering),
+        )
+        .route(
+            "/strategy/kpi-targets",
+            get(list_kpi_targets).post(upsert_kpi_target),
+        )
+        .route(
+            "/strategy/forecasts",
+            get(list_strategy_forecasts).post(upsert_strategy_forecast),
+        )
+        .route(
+            "/strategy/variance/evaluate",
+            post(evaluate_strategy_variance),
+        )
+        .route("/strategy/variance", get(list_strategy_variances))
+        .route(
+            "/strategy/corrective-actions",
+            get(list_strategy_corrective_actions),
+        )
         .route("/governance/thresholds", post(set_threshold))
         .route("/governance/freeze", post(set_freeze))
         .route("/governance/escalations", get(list_escalations))
@@ -371,6 +614,1016 @@ async fn main() -> AnyResult<()> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn upsert_strategy_offering(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertStrategyOfferingRequest>,
+) -> Result<Json<StrategyOfferingView>, (StatusCode, String)> {
+    validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let offering_code = payload.offering_code.trim().to_ascii_uppercase();
+    if offering_code.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "offering_code is required".to_string(),
+        ));
+    }
+
+    let offering_type = normalize_offering_type(&payload.offering_type)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".to_string()));
+    }
+
+    let unit_of_measure = payload.unit_of_measure.trim().to_string();
+    if unit_of_measure.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "unit_of_measure is required".to_string(),
+        ));
+    }
+
+    if let Some(default_unit_price) = payload.default_unit_price {
+        if default_unit_price < Decimal::ZERO {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "default_unit_price must be non-negative".to_string(),
+            ));
+        }
+    }
+
+    let currency = payload
+        .currency
+        .as_deref()
+        .map(normalize_currency)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
+        .unwrap_or_else(|| "USD".to_string());
+    let owner_agent_id = validate_agent_id(&payload.owner_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let active = payload.active.unwrap_or(true);
+    let now = Utc::now();
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO strategy_offerings (
+            id,
+            offering_code,
+            offering_type,
+            name,
+            unit_of_measure,
+            default_unit_price,
+            currency,
+            active,
+            owner_agent_id,
+            created_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+        ON CONFLICT (offering_code)
+        DO UPDATE SET
+            offering_type = EXCLUDED.offering_type,
+            name = EXCLUDED.name,
+            unit_of_measure = EXCLUDED.unit_of_measure,
+            default_unit_price = EXCLUDED.default_unit_price,
+            currency = EXCLUDED.currency,
+            active = EXCLUDED.active,
+            owner_agent_id = EXCLUDED.owner_agent_id,
+            updated_at = EXCLUDED.updated_at
+        RETURNING
+            id,
+            offering_code,
+            offering_type,
+            name,
+            unit_of_measure,
+            default_unit_price,
+            currency,
+            active,
+            owner_agent_id,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(&offering_code)
+    .bind(&offering_type)
+    .bind(&name)
+    .bind(&unit_of_measure)
+    .bind(payload.default_unit_price)
+    .bind(&currency)
+    .bind(active)
+    .bind(&owner_agent_id)
+    .bind(now)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(StrategyOfferingView {
+        id: row.try_get("id").map_err(internal_error)?,
+        offering_code: row.try_get("offering_code").map_err(internal_error)?,
+        offering_type: row.try_get("offering_type").map_err(internal_error)?,
+        name: row.try_get("name").map_err(internal_error)?,
+        unit_of_measure: row.try_get("unit_of_measure").map_err(internal_error)?,
+        default_unit_price: row.try_get("default_unit_price").map_err(internal_error)?,
+        currency: row.try_get("currency").map_err(internal_error)?,
+        active: row.try_get("active").map_err(internal_error)?,
+        owner_agent_id: row.try_get("owner_agent_id").map_err(internal_error)?,
+        created_at: row.try_get("created_at").map_err(internal_error)?,
+        updated_at: row.try_get("updated_at").map_err(internal_error)?,
+    }))
+}
+
+async fn list_strategy_offerings(
+    State(state): State<AppState>,
+    Query(query): Query<ListStrategyOfferingsQuery>,
+) -> Result<Json<ListStrategyOfferingsResponse>, (StatusCode, String)> {
+    let offering_type = query
+        .offering_type
+        .as_deref()
+        .map(normalize_offering_type)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            offering_code,
+            offering_type,
+            name,
+            unit_of_measure,
+            default_unit_price,
+            currency,
+            active,
+            owner_agent_id,
+            created_at,
+            updated_at
+        FROM strategy_offerings
+        WHERE ($1::text IS NULL OR offering_type = $1)
+          AND ($2::boolean IS NULL OR active = $2)
+        ORDER BY updated_at DESC, offering_code ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(offering_type)
+    .bind(query.active)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(StrategyOfferingView {
+            id: row.try_get("id").map_err(internal_error)?,
+            offering_code: row.try_get("offering_code").map_err(internal_error)?,
+            offering_type: row.try_get("offering_type").map_err(internal_error)?,
+            name: row.try_get("name").map_err(internal_error)?,
+            unit_of_measure: row.try_get("unit_of_measure").map_err(internal_error)?,
+            default_unit_price: row.try_get("default_unit_price").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            active: row.try_get("active").map_err(internal_error)?,
+            owner_agent_id: row.try_get("owner_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListStrategyOfferingsResponse { items }))
+}
+
+async fn upsert_kpi_target(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertKpiTargetRequest>,
+) -> Result<Json<KpiTargetView>, (StatusCode, String)> {
+    let updated_by_agent_id = validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    validate_period_range(payload.period_start, payload.period_end)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let business_unit = normalize_strategy_key(&payload.business_unit, "business_unit")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = normalize_strategy_key(&payload.mandate, "mandate")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = normalize_metric_name(&payload.metric_name)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if payload.target_value < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "target_value must be non-negative".to_string(),
+        ));
+    }
+
+    let warning_threshold_pct = payload
+        .warning_threshold_pct
+        .unwrap_or_else(default_warning_threshold_pct);
+    let critical_threshold_pct = payload
+        .critical_threshold_pct
+        .unwrap_or_else(default_critical_threshold_pct);
+
+    if warning_threshold_pct < Decimal::ZERO || critical_threshold_pct < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "threshold percentages must be non-negative".to_string(),
+        ));
+    }
+    if critical_threshold_pct < warning_threshold_pct {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "critical_threshold_pct must be greater than or equal to warning_threshold_pct"
+                .to_string(),
+        ));
+    }
+
+    let currency = payload
+        .currency
+        .as_deref()
+        .map(normalize_currency)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
+        .unwrap_or_else(|| "USD".to_string());
+    let now = Utc::now();
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO strategy_kpi_targets (
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            target_value,
+            warning_threshold_pct,
+            critical_threshold_pct,
+            currency,
+            updated_by_agent_id,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12
+        )
+        ON CONFLICT (period_start, period_end, business_unit, mandate, metric_name)
+        DO UPDATE SET
+            target_value = EXCLUDED.target_value,
+            warning_threshold_pct = EXCLUDED.warning_threshold_pct,
+            critical_threshold_pct = EXCLUDED.critical_threshold_pct,
+            currency = EXCLUDED.currency,
+            updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+            updated_at = EXCLUDED.updated_at
+        RETURNING
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            target_value,
+            warning_threshold_pct,
+            critical_threshold_pct,
+            currency,
+            updated_by_agent_id,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(&business_unit)
+    .bind(&mandate)
+    .bind(&metric_name)
+    .bind(payload.target_value)
+    .bind(warning_threshold_pct)
+    .bind(critical_threshold_pct)
+    .bind(&currency)
+    .bind(&updated_by_agent_id)
+    .bind(now)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(KpiTargetView {
+        id: row.try_get("id").map_err(internal_error)?,
+        period_start: row.try_get("period_start").map_err(internal_error)?,
+        period_end: row.try_get("period_end").map_err(internal_error)?,
+        business_unit: row.try_get("business_unit").map_err(internal_error)?,
+        mandate: row.try_get("mandate").map_err(internal_error)?,
+        metric_name: row.try_get("metric_name").map_err(internal_error)?,
+        target_value: row.try_get("target_value").map_err(internal_error)?,
+        warning_threshold_pct: row
+            .try_get("warning_threshold_pct")
+            .map_err(internal_error)?,
+        critical_threshold_pct: row
+            .try_get("critical_threshold_pct")
+            .map_err(internal_error)?,
+        currency: row.try_get("currency").map_err(internal_error)?,
+        updated_by_agent_id: row.try_get("updated_by_agent_id").map_err(internal_error)?,
+        created_at: row.try_get("created_at").map_err(internal_error)?,
+        updated_at: row.try_get("updated_at").map_err(internal_error)?,
+    }))
+}
+
+async fn list_kpi_targets(
+    State(state): State<AppState>,
+    Query(query): Query<ListKpiTargetsQuery>,
+) -> Result<Json<ListKpiTargetsResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let business_unit = query
+        .business_unit
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "business_unit"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = query
+        .mandate
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "mandate"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = query
+        .metric_name
+        .as_deref()
+        .map(normalize_metric_name)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            target_value,
+            warning_threshold_pct,
+            critical_threshold_pct,
+            currency,
+            updated_by_agent_id,
+            created_at,
+            updated_at
+        FROM strategy_kpi_targets
+        WHERE ($1::date IS NULL OR period_start >= $1)
+          AND ($2::date IS NULL OR period_end <= $2)
+          AND ($3::text IS NULL OR business_unit = $3)
+          AND ($4::text IS NULL OR mandate = $4)
+          AND ($5::text IS NULL OR metric_name = $5)
+        ORDER BY period_start DESC, business_unit ASC, mandate ASC, metric_name ASC
+        LIMIT $6
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .bind(business_unit)
+    .bind(mandate)
+    .bind(metric_name)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(KpiTargetView {
+            id: row.try_get("id").map_err(internal_error)?,
+            period_start: row.try_get("period_start").map_err(internal_error)?,
+            period_end: row.try_get("period_end").map_err(internal_error)?,
+            business_unit: row.try_get("business_unit").map_err(internal_error)?,
+            mandate: row.try_get("mandate").map_err(internal_error)?,
+            metric_name: row.try_get("metric_name").map_err(internal_error)?,
+            target_value: row.try_get("target_value").map_err(internal_error)?,
+            warning_threshold_pct: row
+                .try_get("warning_threshold_pct")
+                .map_err(internal_error)?,
+            critical_threshold_pct: row
+                .try_get("critical_threshold_pct")
+                .map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            updated_by_agent_id: row.try_get("updated_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListKpiTargetsResponse { items }))
+}
+
+async fn upsert_strategy_forecast(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertForecastRequest>,
+) -> Result<Json<ForecastView>, (StatusCode, String)> {
+    let generated_by_agent_id = validate_governance_actor(&payload.generated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    validate_period_range(payload.period_start, payload.period_end)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let business_unit = normalize_strategy_key(&payload.business_unit, "business_unit")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = normalize_strategy_key(&payload.mandate, "mandate")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = normalize_metric_name(&payload.metric_name)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    if payload.forecast_value < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "forecast_value must be non-negative".to_string(),
+        ));
+    }
+
+    let confidence_pct = payload.confidence_pct.map(|value| value.round_dp(4));
+    if let Some(value) = confidence_pct {
+        if value < Decimal::ZERO || value > Decimal::new(100, 0) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "confidence_pct must be between 0 and 100".to_string(),
+            ));
+        }
+    }
+
+    let assumptions_json = payload.assumptions_json.unwrap_or_else(|| json!({}));
+    let currency = payload
+        .currency
+        .as_deref()
+        .map(normalize_currency)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
+        .unwrap_or_else(|| "USD".to_string());
+    let now = Utc::now();
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO strategy_forecasts (
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            forecast_value,
+            confidence_pct,
+            assumptions_json,
+            currency,
+            generated_by_agent_id,
+            generated_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+        ON CONFLICT (period_start, period_end, business_unit, mandate, metric_name)
+        DO UPDATE SET
+            forecast_value = EXCLUDED.forecast_value,
+            confidence_pct = EXCLUDED.confidence_pct,
+            assumptions_json = EXCLUDED.assumptions_json,
+            currency = EXCLUDED.currency,
+            generated_by_agent_id = EXCLUDED.generated_by_agent_id,
+            generated_at = EXCLUDED.generated_at,
+            updated_at = EXCLUDED.updated_at
+        RETURNING
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            forecast_value,
+            confidence_pct,
+            assumptions_json,
+            currency,
+            generated_by_agent_id,
+            generated_at,
+            updated_at
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(&business_unit)
+    .bind(&mandate)
+    .bind(&metric_name)
+    .bind(payload.forecast_value)
+    .bind(confidence_pct)
+    .bind(assumptions_json)
+    .bind(&currency)
+    .bind(&generated_by_agent_id)
+    .bind(now)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(ForecastView {
+        id: row.try_get("id").map_err(internal_error)?,
+        period_start: row.try_get("period_start").map_err(internal_error)?,
+        period_end: row.try_get("period_end").map_err(internal_error)?,
+        business_unit: row.try_get("business_unit").map_err(internal_error)?,
+        mandate: row.try_get("mandate").map_err(internal_error)?,
+        metric_name: row.try_get("metric_name").map_err(internal_error)?,
+        forecast_value: row.try_get("forecast_value").map_err(internal_error)?,
+        confidence_pct: row.try_get("confidence_pct").map_err(internal_error)?,
+        assumptions_json: row.try_get("assumptions_json").map_err(internal_error)?,
+        currency: row.try_get("currency").map_err(internal_error)?,
+        generated_by_agent_id: row
+            .try_get("generated_by_agent_id")
+            .map_err(internal_error)?,
+        generated_at: row.try_get("generated_at").map_err(internal_error)?,
+        updated_at: row.try_get("updated_at").map_err(internal_error)?,
+    }))
+}
+
+async fn list_strategy_forecasts(
+    State(state): State<AppState>,
+    Query(query): Query<ListForecastsQuery>,
+) -> Result<Json<ListForecastsResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let business_unit = query
+        .business_unit
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "business_unit"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = query
+        .mandate
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "mandate"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = query
+        .metric_name
+        .as_deref()
+        .map(normalize_metric_name)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            forecast_value,
+            confidence_pct,
+            assumptions_json,
+            currency,
+            generated_by_agent_id,
+            generated_at,
+            updated_at
+        FROM strategy_forecasts
+        WHERE ($1::date IS NULL OR period_start >= $1)
+          AND ($2::date IS NULL OR period_end <= $2)
+          AND ($3::text IS NULL OR business_unit = $3)
+          AND ($4::text IS NULL OR mandate = $4)
+          AND ($5::text IS NULL OR metric_name = $5)
+        ORDER BY generated_at DESC, business_unit ASC, mandate ASC, metric_name ASC
+        LIMIT $6
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .bind(business_unit)
+    .bind(mandate)
+    .bind(metric_name)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(ForecastView {
+            id: row.try_get("id").map_err(internal_error)?,
+            period_start: row.try_get("period_start").map_err(internal_error)?,
+            period_end: row.try_get("period_end").map_err(internal_error)?,
+            business_unit: row.try_get("business_unit").map_err(internal_error)?,
+            mandate: row.try_get("mandate").map_err(internal_error)?,
+            metric_name: row.try_get("metric_name").map_err(internal_error)?,
+            forecast_value: row.try_get("forecast_value").map_err(internal_error)?,
+            confidence_pct: row.try_get("confidence_pct").map_err(internal_error)?,
+            assumptions_json: row.try_get("assumptions_json").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            generated_by_agent_id: row
+                .try_get("generated_by_agent_id")
+                .map_err(internal_error)?,
+            generated_at: row.try_get("generated_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListForecastsResponse { items }))
+}
+
+async fn evaluate_strategy_variance(
+    State(state): State<AppState>,
+    Json(payload): Json<EvaluateVarianceRequest>,
+) -> Result<Json<EvaluateVarianceResponse>, (StatusCode, String)> {
+    let requested_by_agent_id = validate_governance_actor(&payload.requested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    validate_period_range(payload.period_start, payload.period_end)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let business_unit = normalize_strategy_key(&payload.business_unit, "business_unit")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = normalize_strategy_key(&payload.mandate, "mandate")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = normalize_metric_name(&payload.metric_name)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let notes = payload
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let (period_start_at, period_end_exclusive) =
+        period_bounds(payload.period_start, payload.period_end)
+            .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+
+    let target_row = sqlx::query(
+        r#"
+        SELECT target_value, warning_threshold_pct, critical_threshold_pct, currency
+        FROM strategy_kpi_targets
+        WHERE period_start = $1
+          AND period_end = $2
+          AND business_unit = $3
+          AND mandate = $4
+          AND metric_name = $5
+        LIMIT 1
+        "#,
+    )
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(&business_unit)
+    .bind(&mandate)
+    .bind(&metric_name)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let Some(target_row) = target_row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "kpi target not found for requested key".to_string(),
+        ));
+    };
+
+    let target_value: Decimal = target_row.try_get("target_value").map_err(internal_error)?;
+    let warning_threshold_pct: Decimal = target_row
+        .try_get("warning_threshold_pct")
+        .map_err(internal_error)?;
+    let critical_threshold_pct: Decimal = target_row
+        .try_get("critical_threshold_pct")
+        .map_err(internal_error)?;
+    let currency: String = target_row.try_get("currency").map_err(internal_error)?;
+
+    let forecast_value = sqlx::query_scalar::<_, Option<Decimal>>(
+        r#"
+        SELECT forecast_value
+        FROM strategy_forecasts
+        WHERE period_start = $1
+          AND period_end = $2
+          AND business_unit = $3
+          AND mandate = $4
+          AND metric_name = $5
+        ORDER BY generated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(&business_unit)
+    .bind(&mandate)
+    .bind(&metric_name)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_error)?
+    .flatten();
+
+    let actual_value = if let Some(actual_value) = payload.actual_value {
+        if actual_value < Decimal::ZERO {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "actual_value must be non-negative".to_string(),
+            ));
+        }
+        actual_value.round_dp(4)
+    } else {
+        derive_actual_metric_from_ledger(
+            &mut tx,
+            &metric_name,
+            period_start_at,
+            period_end_exclusive,
+        )
+        .await
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
+    };
+
+    let variance_amount = (actual_value - target_value).abs().round_dp(4);
+    let variance_pct = if target_value > Decimal::ZERO {
+        (variance_amount / target_value * Decimal::new(100, 0)).round_dp(4)
+    } else {
+        Decimal::ZERO
+    };
+    let severity =
+        classify_variance_severity(variance_pct, warning_threshold_pct, critical_threshold_pct);
+
+    let variance_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    sqlx::query(
+        r#"
+        INSERT INTO strategy_variances (
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            target_value,
+            actual_value,
+            forecast_value,
+            variance_amount,
+            variance_pct,
+            severity,
+            evaluated_by_agent_id,
+            evaluated_at,
+            notes
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+        )
+        "#,
+    )
+    .bind(variance_id)
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(&business_unit)
+    .bind(&mandate)
+    .bind(&metric_name)
+    .bind(target_value)
+    .bind(actual_value)
+    .bind(forecast_value)
+    .bind(variance_amount)
+    .bind(variance_pct)
+    .bind(&severity)
+    .bind(&requested_by_agent_id)
+    .bind(now)
+    .bind(notes.as_deref())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let mut corrective_action_id = None;
+    let mut escalation_id = None;
+
+    if severity == "BREACH" {
+        let created_escalation_id = Uuid::new_v4();
+        let breach_reason = format!(
+            "{} variance breach for {} {}",
+            metric_name, business_unit, mandate
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO governance_escalations (
+                id,
+                action_type,
+                reference_type,
+                reference_id,
+                status,
+                reason_code,
+                amount,
+                currency,
+                requested_by_agent_id,
+                created_at,
+                decision_note
+            )
+            VALUES (
+                $1, 'STRATEGY_VARIANCE_BREACH', 'STRATEGY_VARIANCE', $2, 'PENDING', 'VARIANCE_BREACH', $3, $4, $5, $6, $7
+            )
+            "#,
+        )
+        .bind(created_escalation_id)
+        .bind(variance_id)
+        .bind(variance_amount)
+        .bind(&currency)
+        .bind(&requested_by_agent_id)
+        .bind(now)
+        .bind(&breach_reason)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+        let created_action_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO strategy_corrective_actions (
+                id,
+                variance_id,
+                status,
+                reason_code,
+                action_note,
+                linked_escalation_id,
+                created_by_agent_id,
+                created_at
+            )
+            VALUES ($1, $2, 'OPEN', 'VARIANCE_BREACH', $3, $4, $5, $6)
+            "#,
+        )
+        .bind(created_action_id)
+        .bind(variance_id)
+        .bind(notes.as_deref())
+        .bind(created_escalation_id)
+        .bind(&requested_by_agent_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+        corrective_action_id = Some(created_action_id);
+        escalation_id = Some(created_escalation_id);
+    }
+
+    tx.commit().await.map_err(internal_error)?;
+
+    Ok(Json(EvaluateVarianceResponse {
+        variance_id,
+        period_start: payload.period_start,
+        period_end: payload.period_end,
+        business_unit,
+        mandate,
+        metric_name,
+        target_value,
+        actual_value,
+        forecast_value,
+        variance_amount,
+        variance_pct,
+        severity,
+        corrective_action_id,
+        escalation_id,
+        evaluated_at: now,
+    }))
+}
+
+async fn list_strategy_variances(
+    State(state): State<AppState>,
+    Query(query): Query<ListVariancesQuery>,
+) -> Result<Json<ListVariancesResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let business_unit = query
+        .business_unit
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "business_unit"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let mandate = query
+        .mandate
+        .as_deref()
+        .map(|value| normalize_strategy_key(value, "mandate"))
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let metric_name = query
+        .metric_name
+        .as_deref()
+        .map(normalize_metric_name)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let severity = query
+        .severity
+        .as_deref()
+        .map(normalize_variance_severity)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            period_start,
+            period_end,
+            business_unit,
+            mandate,
+            metric_name,
+            target_value,
+            actual_value,
+            forecast_value,
+            variance_amount,
+            variance_pct,
+            severity,
+            evaluated_by_agent_id,
+            evaluated_at,
+            notes
+        FROM strategy_variances
+        WHERE ($1::date IS NULL OR period_start >= $1)
+          AND ($2::date IS NULL OR period_end <= $2)
+          AND ($3::text IS NULL OR business_unit = $3)
+          AND ($4::text IS NULL OR mandate = $4)
+          AND ($5::text IS NULL OR metric_name = $5)
+          AND ($6::text IS NULL OR severity = $6)
+        ORDER BY evaluated_at DESC
+        LIMIT $7
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .bind(business_unit)
+    .bind(mandate)
+    .bind(metric_name)
+    .bind(severity)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(StrategyVarianceView {
+            id: row.try_get("id").map_err(internal_error)?,
+            period_start: row.try_get("period_start").map_err(internal_error)?,
+            period_end: row.try_get("period_end").map_err(internal_error)?,
+            business_unit: row.try_get("business_unit").map_err(internal_error)?,
+            mandate: row.try_get("mandate").map_err(internal_error)?,
+            metric_name: row.try_get("metric_name").map_err(internal_error)?,
+            target_value: row.try_get("target_value").map_err(internal_error)?,
+            actual_value: row.try_get("actual_value").map_err(internal_error)?,
+            forecast_value: row.try_get("forecast_value").map_err(internal_error)?,
+            variance_amount: row.try_get("variance_amount").map_err(internal_error)?,
+            variance_pct: row.try_get("variance_pct").map_err(internal_error)?,
+            severity: row.try_get("severity").map_err(internal_error)?,
+            evaluated_by_agent_id: row
+                .try_get("evaluated_by_agent_id")
+                .map_err(internal_error)?,
+            evaluated_at: row.try_get("evaluated_at").map_err(internal_error)?,
+            notes: row.try_get("notes").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListVariancesResponse { items }))
+}
+
+async fn list_strategy_corrective_actions(
+    State(state): State<AppState>,
+    Query(query): Query<ListCorrectiveActionsQuery>,
+) -> Result<Json<ListCorrectiveActionsResponse>, (StatusCode, String)> {
+    let status = query
+        .status
+        .as_deref()
+        .map(normalize_corrective_action_status)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            variance_id,
+            status,
+            reason_code,
+            action_note,
+            linked_escalation_id,
+            created_by_agent_id,
+            created_at,
+            closed_at
+        FROM strategy_corrective_actions
+        WHERE ($1::text IS NULL OR status = $1)
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(status)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(StrategyCorrectiveActionView {
+            id: row.try_get("id").map_err(internal_error)?,
+            variance_id: row.try_get("variance_id").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            reason_code: row.try_get("reason_code").map_err(internal_error)?,
+            action_note: row.try_get("action_note").map_err(internal_error)?,
+            linked_escalation_id: row
+                .try_get("linked_escalation_id")
+                .map_err(internal_error)?,
+            created_by_agent_id: row.try_get("created_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            closed_at: row.try_get("closed_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListCorrectiveActionsResponse { items }))
 }
 
 async fn create_lead(
@@ -2697,6 +3950,69 @@ async fn dispatch_order_event(
     Ok(())
 }
 
+async fn derive_actual_metric_from_ledger(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    metric_name: &str,
+    period_start_at: DateTime<Utc>,
+    period_end_exclusive: DateTime<Utc>,
+) -> AnyResult<Decimal> {
+    let value = match metric_name {
+        "REVENUE" => {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"
+                SELECT COALESCE(SUM(credit - debit), 0)::numeric
+                FROM journals
+                WHERE account = '4000'
+                  AND posted_at >= $1
+                  AND posted_at < $2
+                "#,
+            )
+            .bind(period_start_at)
+            .bind(period_end_exclusive)
+            .fetch_one(&mut **tx)
+            .await?
+        }
+        "COST" => {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"
+                SELECT COALESCE(SUM(debit - credit), 0)::numeric
+                FROM journals
+                WHERE account IN ('5000', '5100')
+                  AND posted_at >= $1
+                  AND posted_at < $2
+                "#,
+            )
+            .bind(period_start_at)
+            .bind(period_end_exclusive)
+            .fetch_one(&mut **tx)
+            .await?
+        }
+        "CASH" => {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"
+                SELECT COALESCE(SUM(debit - credit), 0)::numeric
+                FROM journals
+                WHERE account = '1000'
+                  AND posted_at >= $1
+                  AND posted_at < $2
+                "#,
+            )
+            .bind(period_start_at)
+            .bind(period_end_exclusive)
+            .fetch_one(&mut **tx)
+            .await?
+        }
+        _ => {
+            anyhow::bail!(
+                "actual_value is required for metric '{}'; automatic derivation supports REVENUE, COST, CASH",
+                metric_name
+            );
+        }
+    };
+
+    Ok(value.round_dp(4))
+}
+
 fn validate_order_request(payload: &CreateOrderRequest) -> AnyResult<(String, String)> {
     if payload.customer_email.trim().is_empty() {
         anyhow::bail!("customer_email is required");
@@ -2844,6 +4160,105 @@ fn normalize_routing_transaction_type(value: &str) -> AnyResult<String> {
         "ANY" | "PRODUCT" | "SERVICE" => Ok(normalized),
         _ => anyhow::bail!("transaction_type must be ANY, PRODUCT, or SERVICE"),
     }
+}
+
+fn normalize_offering_type(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "PRODUCT" | "SERVICE" => Ok(normalized),
+        _ => anyhow::bail!("offering_type must be PRODUCT or SERVICE"),
+    }
+}
+
+fn normalize_strategy_key(value: &str, field_name: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        anyhow::bail!("{field_name} is required");
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_metric_name(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        anyhow::bail!("metric_name is required");
+    }
+    if !normalized.chars().all(|character| {
+        character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+    }) {
+        anyhow::bail!("metric_name must contain only uppercase letters, digits, and underscores");
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_variance_severity(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "ON_TRACK" | "WARNING" | "BREACH" => Ok(normalized),
+        _ => anyhow::bail!("severity must be ON_TRACK, WARNING, or BREACH"),
+    }
+}
+
+fn normalize_corrective_action_status(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "OPEN" | "CLOSED" => Ok(normalized),
+        _ => anyhow::bail!("status must be OPEN or CLOSED"),
+    }
+}
+
+fn validate_period_range(period_start: NaiveDate, period_end: NaiveDate) -> AnyResult<()> {
+    if period_end < period_start {
+        anyhow::bail!("period_end must be greater than or equal to period_start");
+    }
+
+    Ok(())
+}
+
+fn period_bounds(
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+) -> AnyResult<(DateTime<Utc>, DateTime<Utc>)> {
+    validate_period_range(period_start, period_end)?;
+
+    let start_naive = period_start
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid period_start"))?;
+    let end_day = period_end
+        .succ_opt()
+        .ok_or_else(|| anyhow::anyhow!("invalid period_end"))?;
+    let end_naive = end_day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid period_end"))?;
+
+    Ok((
+        DateTime::<Utc>::from_naive_utc_and_offset(start_naive, Utc),
+        DateTime::<Utc>::from_naive_utc_and_offset(end_naive, Utc),
+    ))
+}
+
+fn classify_variance_severity(
+    variance_pct: Decimal,
+    warning_threshold_pct: Decimal,
+    critical_threshold_pct: Decimal,
+) -> String {
+    if variance_pct >= critical_threshold_pct {
+        "BREACH".to_string()
+    } else if variance_pct >= warning_threshold_pct {
+        "WARNING".to_string()
+    } else {
+        "ON_TRACK".to_string()
+    }
+}
+
+fn default_warning_threshold_pct() -> Decimal {
+    Decimal::new(500, 2) // 5.00
+}
+
+fn default_critical_threshold_pct() -> Decimal {
+    Decimal::new(1000, 2) // 10.00
 }
 
 fn default_auto_approval_limit() -> Decimal {

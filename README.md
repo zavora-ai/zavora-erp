@@ -194,6 +194,83 @@ curl -X POST http://localhost:8080/governance/thresholds \
   }'
 ```
 
+Upsert strategy offering (FU-01):
+
+```bash
+curl -X POST http://localhost:8080/strategy/offerings \
+  -H 'content-type: application/json' \
+  -d '{
+    "offering_code": "SVC-IMPLEMENTATION",
+    "offering_type": "SERVICE",
+    "name": "Implementation Service Package",
+    "unit_of_measure": "ENGAGEMENT",
+    "default_unit_price": "1100.00",
+    "currency": "USD",
+    "owner_agent_id": "strategy-agent",
+    "updated_by_agent_id": "strategy-agent"
+  }'
+```
+
+Upsert KPI target (FU-01):
+
+```bash
+curl -X POST http://localhost:8080/strategy/kpi-targets \
+  -H 'content-type: application/json' \
+  -d '{
+    "period_start": "2026-02-01",
+    "period_end": "2026-02-28",
+    "business_unit": "GLOBAL",
+    "mandate": "GROWTH",
+    "metric_name": "REVENUE",
+    "target_value": "15000.00",
+    "warning_threshold_pct": "5.00",
+    "critical_threshold_pct": "10.00",
+    "currency": "USD",
+    "updated_by_agent_id": "strategy-agent"
+  }'
+```
+
+Upsert forecast baseline (FU-01):
+
+```bash
+curl -X POST http://localhost:8080/strategy/forecasts \
+  -H 'content-type: application/json' \
+  -d '{
+    "period_start": "2026-02-01",
+    "period_end": "2026-02-28",
+    "business_unit": "GLOBAL",
+    "mandate": "GROWTH",
+    "metric_name": "REVENUE",
+    "forecast_value": "14250.00",
+    "confidence_pct": "82.50",
+    "assumptions_json": {"driver":"pipeline-weighted"},
+    "currency": "USD",
+    "generated_by_agent_id": "strategy-agent"
+  }'
+```
+
+Evaluate target-vs-actual variance and trigger corrective action on breach:
+
+```bash
+curl -X POST http://localhost:8080/strategy/variance/evaluate \
+  -H 'content-type: application/json' \
+  -d '{
+    "period_start": "2026-02-01",
+    "period_end": "2026-02-28",
+    "business_unit": "GLOBAL",
+    "mandate": "GROWTH",
+    "metric_name": "REVENUE",
+    "requested_by_agent_id": "strategy-agent"
+  }'
+```
+
+Inspect variance history and open corrective actions:
+
+```bash
+curl "http://localhost:8080/strategy/variance?limit=20"
+curl "http://localhost:8080/strategy/corrective-actions?status=OPEN&limit=20"
+```
+
 List pending governance escalations:
 
 ```bash
