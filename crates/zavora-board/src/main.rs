@@ -33,6 +33,23 @@ struct SkillTelemetryQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FinancePeriodQuery {
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BalanceSheetQuery {
+    as_of: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgingQuery {
+    as_of: Option<DateTime<Utc>>,
+    limit: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct SkillUnitEconomicsResponse {
     generated_at: DateTime<Utc>,
@@ -47,6 +64,135 @@ struct SkillTelemetryResponse {
     period_start: Option<DateTime<Utc>>,
     period_end: Option<DateTime<Utc>>,
     items: Vec<SkillTelemetryRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct TrialBalanceRow {
+    account: String,
+    total_debit: Decimal,
+    total_credit: Decimal,
+    balance: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct TrialBalanceResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    total_debit: Decimal,
+    total_credit: Decimal,
+    net_balance: Decimal,
+    is_balanced: bool,
+    items: Vec<TrialBalanceRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfitAndLossResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    revenue: Decimal,
+    cogs: Decimal,
+    gross_profit: Decimal,
+    operating_expense: Decimal,
+    operating_profit: Decimal,
+    autonomy_cost: Decimal,
+    profit_after_autonomy_cost: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct BalanceSheetRow {
+    account: String,
+    category: String,
+    amount: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct BalanceSheetResponse {
+    generated_at: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    assets_total: Decimal,
+    liabilities_total: Decimal,
+    equity_accounts_total: Decimal,
+    net_income_unclosed: Decimal,
+    equity_total: Decimal,
+    is_balanced: bool,
+    items: Vec<BalanceSheetRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct CashFlowResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    cash_opening_balance: Decimal,
+    cash_inflows: Decimal,
+    cash_outflows: Decimal,
+    net_cash_change: Decimal,
+    cash_closing_balance: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct RevenueTrackingResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    accepted_quotes: i64,
+    fulfilled_orders: i64,
+    settled_orders: i64,
+    booked_revenue: Decimal,
+    billed_revenue: Decimal,
+    collected_revenue: Decimal,
+    unbilled_revenue: Decimal,
+    billed_not_collected: Decimal,
+    collection_rate_pct: Decimal,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct AgingBucketTotals {
+    current: Decimal,
+    days_1_30: Decimal,
+    days_31_60: Decimal,
+    days_61_90: Decimal,
+    days_90_plus: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct ArAgingRow {
+    order_id: Uuid,
+    customer_email: String,
+    due_at: DateTime<Utc>,
+    age_days: i64,
+    outstanding_ar: Decimal,
+    bucket: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ArAgingResponse {
+    generated_at: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    total_outstanding_ar: Decimal,
+    buckets: AgingBucketTotals,
+    items: Vec<ArAgingRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApAgingRow {
+    order_id: Uuid,
+    account: String,
+    due_at: DateTime<Utc>,
+    age_days: i64,
+    outstanding_ap: Decimal,
+    bucket: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ApAgingResponse {
+    generated_at: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    total_outstanding_ap: Decimal,
+    buckets: AgingBucketTotals,
+    items: Vec<ApAgingRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -326,6 +472,13 @@ async fn main() -> AnyResult<()> {
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/board/pack", get(board_pack))
+        .route("/finance/trial-balance", get(trial_balance))
+        .route("/finance/pnl", get(profit_and_loss))
+        .route("/finance/balance-sheet", get(balance_sheet))
+        .route("/finance/cash-flow", get(cash_flow))
+        .route("/revenue/tracking", get(revenue_tracking))
+        .route("/finance/ar-aging", get(ar_aging))
+        .route("/finance/ap-aging", get(ap_aging))
         .route("/board/skills/unit-economics", get(skill_unit_economics))
         .route("/board/skills/telemetry", get(skill_telemetry))
         .route("/audit/orders/{order_id}/evidence", get(order_evidence))
@@ -491,6 +644,559 @@ async fn board_pack(
     };
 
     Ok(Json(pack))
+}
+
+async fn trial_balance(
+    State(state): State<AppState>,
+    Query(query): Query<FinancePeriodQuery>,
+) -> std::result::Result<Json<TrialBalanceResponse>, (axum::http::StatusCode, String)> {
+    validate_period_bounds(query.period_start, query.period_end)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            account,
+            COALESCE(SUM(debit), 0) AS total_debit,
+            COALESCE(SUM(credit), 0) AS total_credit
+        FROM journals
+        WHERE ($1::timestamptz IS NULL OR posted_at >= $1)
+          AND ($2::timestamptz IS NULL OR posted_at < $2)
+        GROUP BY account
+        ORDER BY account
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut total_debit = Decimal::ZERO;
+    let mut total_credit = Decimal::ZERO;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let debit: Decimal = row.try_get("total_debit").map_err(internal_error)?;
+        let credit: Decimal = row.try_get("total_credit").map_err(internal_error)?;
+        total_debit += debit;
+        total_credit += credit;
+        items.push(TrialBalanceRow {
+            account: row.try_get("account").map_err(internal_error)?,
+            total_debit: debit.round_dp(4),
+            total_credit: credit.round_dp(4),
+            balance: (debit - credit).round_dp(4),
+        });
+    }
+
+    let net_balance = (total_debit - total_credit).round_dp(4);
+    let is_balanced = net_balance.abs() <= Decimal::new(1, 2);
+
+    Ok(Json(TrialBalanceResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        total_debit: total_debit.round_dp(4),
+        total_credit: total_credit.round_dp(4),
+        net_balance,
+        is_balanced,
+        items,
+    }))
+}
+
+async fn profit_and_loss(
+    State(state): State<AppState>,
+    Query(query): Query<FinancePeriodQuery>,
+) -> std::result::Result<Json<ProfitAndLossResponse>, (axum::http::StatusCode, String)> {
+    validate_period_bounds(query.period_start, query.period_end)?;
+
+    let pnl_row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN account LIKE '4%' THEN credit - debit ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN account = '5000' THEN debit - credit ELSE 0 END), 0) AS cogs,
+            COALESCE(SUM(CASE WHEN account LIKE '5%' AND account <> '5000' THEN debit - credit ELSE 0 END), 0) AS operating_expense
+        FROM journals
+        WHERE ($1::timestamptz IS NULL OR posted_at >= $1)
+          AND ($2::timestamptz IS NULL OR posted_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let autonomy_row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(allocated_cost), 0) AS autonomy_cost
+        FROM finops_cost_allocations
+        WHERE ($1::timestamptz IS NULL OR period_end > $1)
+          AND ($2::timestamptz IS NULL OR period_start < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let revenue: Decimal = pnl_row.try_get("revenue").map_err(internal_error)?;
+    let cogs: Decimal = pnl_row.try_get("cogs").map_err(internal_error)?;
+    let operating_expense: Decimal = pnl_row
+        .try_get("operating_expense")
+        .map_err(internal_error)?;
+    let autonomy_cost: Decimal = autonomy_row
+        .try_get("autonomy_cost")
+        .map_err(internal_error)?;
+
+    let gross_profit = (revenue - cogs).round_dp(4);
+    let operating_profit = (gross_profit - operating_expense).round_dp(4);
+    let profit_after_autonomy_cost = (operating_profit - autonomy_cost).round_dp(4);
+
+    Ok(Json(ProfitAndLossResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        revenue: revenue.round_dp(4),
+        cogs: cogs.round_dp(4),
+        gross_profit,
+        operating_expense: operating_expense.round_dp(4),
+        operating_profit,
+        autonomy_cost: autonomy_cost.round_dp(4),
+        profit_after_autonomy_cost,
+    }))
+}
+
+async fn balance_sheet(
+    State(state): State<AppState>,
+    Query(query): Query<BalanceSheetQuery>,
+) -> std::result::Result<Json<BalanceSheetResponse>, (axum::http::StatusCode, String)> {
+    let as_of = query.as_of.unwrap_or_else(Utc::now);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            account,
+            COALESCE(SUM(debit), 0) AS total_debit,
+            COALESCE(SUM(credit), 0) AS total_credit
+        FROM journals
+        WHERE posted_at <= $1
+        GROUP BY account
+        ORDER BY account
+        "#,
+    )
+    .bind(as_of)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let income_row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN account LIKE '4%' THEN credit - debit ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN account LIKE '5%' THEN debit - credit ELSE 0 END), 0) AS expenses
+        FROM journals
+        WHERE posted_at <= $1
+        "#,
+    )
+    .bind(as_of)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut assets_total = Decimal::ZERO;
+    let mut liabilities_total = Decimal::ZERO;
+    let mut equity_accounts_total = Decimal::ZERO;
+    let mut items = Vec::new();
+
+    for row in rows {
+        let account: String = row.try_get("account").map_err(internal_error)?;
+        let debit: Decimal = row.try_get("total_debit").map_err(internal_error)?;
+        let credit: Decimal = row.try_get("total_credit").map_err(internal_error)?;
+        match account_category(&account) {
+            Some("ASSET") => {
+                let amount = (debit - credit).round_dp(4);
+                assets_total += amount;
+                if amount.abs() > Decimal::ZERO {
+                    items.push(BalanceSheetRow {
+                        account,
+                        category: "ASSET".to_string(),
+                        amount,
+                    });
+                }
+            }
+            Some("LIABILITY") => {
+                let amount = (credit - debit).round_dp(4);
+                liabilities_total += amount;
+                if amount.abs() > Decimal::ZERO {
+                    items.push(BalanceSheetRow {
+                        account,
+                        category: "LIABILITY".to_string(),
+                        amount,
+                    });
+                }
+            }
+            Some("EQUITY") => {
+                let amount = (credit - debit).round_dp(4);
+                equity_accounts_total += amount;
+                if amount.abs() > Decimal::ZERO {
+                    items.push(BalanceSheetRow {
+                        account,
+                        category: "EQUITY".to_string(),
+                        amount,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let revenue: Decimal = income_row.try_get("revenue").map_err(internal_error)?;
+    let expenses: Decimal = income_row.try_get("expenses").map_err(internal_error)?;
+    let net_income_unclosed = (revenue - expenses).round_dp(4);
+    if net_income_unclosed.abs() > Decimal::ZERO {
+        items.push(BalanceSheetRow {
+            account: "UNREALIZED_PNL".to_string(),
+            category: "EQUITY_ADJUSTMENT".to_string(),
+            amount: net_income_unclosed,
+        });
+    }
+
+    let assets_total = assets_total.round_dp(4);
+    let liabilities_total = liabilities_total.round_dp(4);
+    let equity_accounts_total = equity_accounts_total.round_dp(4);
+    let equity_total = (equity_accounts_total + net_income_unclosed).round_dp(4);
+    let is_balanced = (assets_total - liabilities_total - equity_total).abs() <= Decimal::new(1, 2);
+
+    Ok(Json(BalanceSheetResponse {
+        generated_at: Utc::now(),
+        as_of,
+        assets_total,
+        liabilities_total,
+        equity_accounts_total,
+        net_income_unclosed,
+        equity_total,
+        is_balanced,
+        items,
+    }))
+}
+
+async fn cash_flow(
+    State(state): State<AppState>,
+    Query(query): Query<FinancePeriodQuery>,
+) -> std::result::Result<Json<CashFlowResponse>, (axum::http::StatusCode, String)> {
+    validate_period_bounds(query.period_start, query.period_end)?;
+
+    let opening_balance = if let Some(period_start) = query.period_start {
+        sqlx::query_scalar::<_, Decimal>(
+            r#"
+            SELECT COALESCE(SUM(debit - credit), 0)
+            FROM journals
+            WHERE account = '1000'
+              AND posted_at < $1
+            "#,
+        )
+        .bind(period_start)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(internal_error)?
+    } else {
+        Decimal::ZERO
+    };
+
+    let period_row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN account = '1000' THEN debit ELSE 0 END), 0) AS cash_inflows,
+            COALESCE(SUM(CASE WHEN account = '1000' THEN credit ELSE 0 END), 0) AS cash_outflows
+        FROM journals
+        WHERE ($1::timestamptz IS NULL OR posted_at >= $1)
+          AND ($2::timestamptz IS NULL OR posted_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let cash_inflows: Decimal = period_row.try_get("cash_inflows").map_err(internal_error)?;
+    let cash_outflows: Decimal = period_row
+        .try_get("cash_outflows")
+        .map_err(internal_error)?;
+    let net_cash_change = (cash_inflows - cash_outflows).round_dp(4);
+    let cash_closing_balance = (opening_balance + net_cash_change).round_dp(4);
+
+    Ok(Json(CashFlowResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        cash_opening_balance: opening_balance.round_dp(4),
+        cash_inflows: cash_inflows.round_dp(4),
+        cash_outflows: cash_outflows.round_dp(4),
+        net_cash_change,
+        cash_closing_balance,
+    }))
+}
+
+async fn revenue_tracking(
+    State(state): State<AppState>,
+    Query(query): Query<FinancePeriodQuery>,
+) -> std::result::Result<Json<RevenueTrackingResponse>, (axum::http::StatusCode, String)> {
+    validate_period_bounds(query.period_start, query.period_end)?;
+
+    let booked_row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT AS accepted_quotes,
+            COALESCE(SUM(q.quantity * q.unit_price), 0) AS booked_revenue
+        FROM quote_acceptances qa
+        INNER JOIN quotes q ON q.id = qa.quote_id
+        WHERE ($1::timestamptz IS NULL OR qa.accepted_at >= $1)
+          AND ($2::timestamptz IS NULL OR qa.accepted_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let billed_row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(credit - debit), 0) AS billed_revenue
+        FROM journals
+        WHERE account = '4000'
+          AND ($1::timestamptz IS NULL OR posted_at >= $1)
+          AND ($2::timestamptz IS NULL OR posted_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let settlement_row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(DISTINCT order_id)::BIGINT AS settled_orders,
+            COALESCE(SUM(amount), 0) AS collected_revenue
+        FROM settlements
+        WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+          AND ($2::timestamptz IS NULL OR received_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let fulfilled_orders = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM orders
+        WHERE status = 'FULFILLED'
+          AND ($1::timestamptz IS NULL OR fulfilled_at >= $1)
+          AND ($2::timestamptz IS NULL OR fulfilled_at < $2)
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let accepted_quotes: i64 = booked_row
+        .try_get("accepted_quotes")
+        .map_err(internal_error)?;
+    let booked_revenue: Decimal = booked_row
+        .try_get("booked_revenue")
+        .map_err(internal_error)?;
+    let billed_revenue: Decimal = billed_row
+        .try_get("billed_revenue")
+        .map_err(internal_error)?;
+    let settled_orders: i64 = settlement_row
+        .try_get("settled_orders")
+        .map_err(internal_error)?;
+    let collected_revenue: Decimal = settlement_row
+        .try_get("collected_revenue")
+        .map_err(internal_error)?;
+
+    let unbilled_revenue = (booked_revenue - billed_revenue).round_dp(4);
+    let billed_not_collected = (billed_revenue - collected_revenue).round_dp(4);
+    let collection_rate_pct = if billed_revenue > Decimal::ZERO {
+        ((collected_revenue / billed_revenue) * Decimal::new(100, 0)).round_dp(4)
+    } else {
+        Decimal::ZERO
+    };
+
+    Ok(Json(RevenueTrackingResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        accepted_quotes,
+        fulfilled_orders,
+        settled_orders,
+        booked_revenue: booked_revenue.round_dp(4),
+        billed_revenue: billed_revenue.round_dp(4),
+        collected_revenue: collected_revenue.round_dp(4),
+        unbilled_revenue,
+        billed_not_collected,
+        collection_rate_pct,
+    }))
+}
+
+async fn ar_aging(
+    State(state): State<AppState>,
+    Query(query): Query<AgingQuery>,
+) -> std::result::Result<Json<ArAgingResponse>, (axum::http::StatusCode, String)> {
+    let as_of = query.as_of.unwrap_or_else(Utc::now);
+    let limit = query.limit.unwrap_or(200).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        WITH ar_balances AS (
+            SELECT
+                order_id,
+                COALESCE(SUM(debit - credit), 0) AS outstanding_ar
+            FROM journals
+            WHERE account = '1100'
+            GROUP BY order_id
+        ),
+        ar_enriched AS (
+            SELECT
+                o.id AS order_id,
+                o.customer_email,
+                COALESCE(
+                    qa.accepted_at + make_interval(days => q.payment_terms_days),
+                    o.created_at + interval '30 day'
+                ) AS due_at,
+                ab.outstanding_ar
+            FROM ar_balances ab
+            INNER JOIN orders o ON o.id = ab.order_id
+            LEFT JOIN quote_acceptances qa ON qa.order_id = o.id
+            LEFT JOIN quotes q ON q.id = qa.quote_id
+            WHERE ab.outstanding_ar > 0
+        )
+        SELECT
+            order_id,
+            customer_email,
+            due_at,
+            (EXTRACT(EPOCH FROM ($1::timestamptz - due_at)) / 86400)::BIGINT AS age_days,
+            outstanding_ar
+        FROM ar_enriched
+        ORDER BY due_at ASC, order_id ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(as_of)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut buckets = AgingBucketTotals::default();
+    let mut total_outstanding_ar = Decimal::ZERO;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let age_days: i64 = row.try_get("age_days").map_err(internal_error)?;
+        let outstanding_ar: Decimal = row.try_get("outstanding_ar").map_err(internal_error)?;
+        let bucket = aging_bucket_label(age_days);
+        accumulate_aging_bucket(&mut buckets, bucket, outstanding_ar);
+        total_outstanding_ar += outstanding_ar;
+        items.push(ArAgingRow {
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            customer_email: row.try_get("customer_email").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            age_days,
+            outstanding_ar: outstanding_ar.round_dp(4),
+            bucket: bucket.to_string(),
+        });
+    }
+
+    Ok(Json(ArAgingResponse {
+        generated_at: Utc::now(),
+        as_of,
+        total_outstanding_ar: total_outstanding_ar.round_dp(4),
+        buckets,
+        items,
+    }))
+}
+
+async fn ap_aging(
+    State(state): State<AppState>,
+    Query(query): Query<AgingQuery>,
+) -> std::result::Result<Json<ApAgingResponse>, (axum::http::StatusCode, String)> {
+    let as_of = query.as_of.unwrap_or_else(Utc::now);
+    let limit = query.limit.unwrap_or(200).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        WITH ap_balances AS (
+            SELECT
+                order_id,
+                account,
+                COALESCE(SUM(credit - debit), 0) AS outstanding_ap
+            FROM journals
+            WHERE account IN ('2100', '2200')
+            GROUP BY order_id, account
+        ),
+        ap_enriched AS (
+            SELECT
+                o.id AS order_id,
+                ap.account,
+                COALESCE(o.fulfilled_at, o.created_at) + interval '30 day' AS due_at,
+                ap.outstanding_ap
+            FROM ap_balances ap
+            INNER JOIN orders o ON o.id = ap.order_id
+            WHERE ap.outstanding_ap > 0
+        )
+        SELECT
+            order_id,
+            account,
+            due_at,
+            (EXTRACT(EPOCH FROM ($1::timestamptz - due_at)) / 86400)::BIGINT AS age_days,
+            outstanding_ap
+        FROM ap_enriched
+        ORDER BY due_at ASC, order_id ASC, account ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(as_of)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut buckets = AgingBucketTotals::default();
+    let mut total_outstanding_ap = Decimal::ZERO;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let age_days: i64 = row.try_get("age_days").map_err(internal_error)?;
+        let outstanding_ap: Decimal = row.try_get("outstanding_ap").map_err(internal_error)?;
+        let bucket = aging_bucket_label(age_days);
+        accumulate_aging_bucket(&mut buckets, bucket, outstanding_ap);
+        total_outstanding_ap += outstanding_ap;
+        items.push(ApAgingRow {
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            account: row.try_get("account").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            age_days,
+            outstanding_ap: outstanding_ap.round_dp(4),
+            bucket: bucket.to_string(),
+        });
+    }
+
+    Ok(Json(ApAgingResponse {
+        generated_at: Utc::now(),
+        as_of,
+        total_outstanding_ap: total_outstanding_ap.round_dp(4),
+        buckets,
+        items,
+    }))
 }
 
 async fn skill_unit_economics(
@@ -1522,6 +2228,61 @@ async fn order_evidence(
     };
 
     Ok(Json(package))
+}
+
+fn validate_period_bounds(
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+) -> std::result::Result<(), (axum::http::StatusCode, String)> {
+    if let (Some(period_start), Some(period_end)) = (period_start, period_end) {
+        if period_end <= period_start {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "period_end must be greater than period_start".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn account_category(account: &str) -> Option<&'static str> {
+    match account.chars().next() {
+        Some('1') => Some("ASSET"),
+        Some('2') => Some("LIABILITY"),
+        Some('3') => Some("EQUITY"),
+        _ => None,
+    }
+}
+
+fn aging_bucket_label(age_days: i64) -> &'static str {
+    if age_days <= 0 {
+        "CURRENT"
+    } else if age_days <= 30 {
+        "1_30"
+    } else if age_days <= 60 {
+        "31_60"
+    } else if age_days <= 90 {
+        "61_90"
+    } else {
+        "90_PLUS"
+    }
+}
+
+fn accumulate_aging_bucket(totals: &mut AgingBucketTotals, bucket: &str, amount: Decimal) {
+    match bucket {
+        "CURRENT" => totals.current += amount,
+        "1_30" => totals.days_1_30 += amount,
+        "31_60" => totals.days_31_60 += amount,
+        "61_90" => totals.days_61_90 += amount,
+        _ => totals.days_90_plus += amount,
+    }
+
+    totals.current = totals.current.round_dp(4);
+    totals.days_1_30 = totals.days_1_30.round_dp(4);
+    totals.days_31_60 = totals.days_31_60.round_dp(4);
+    totals.days_61_90 = totals.days_61_90.round_dp(4);
+    totals.days_90_plus = totals.days_90_plus.round_dp(4);
 }
 
 fn internal_error<E: std::fmt::Display>(err: E) -> (axum::http::StatusCode, String) {

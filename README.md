@@ -442,6 +442,23 @@ Read board pack:
 curl http://localhost:8090/board/pack
 ```
 
+Read finance reporting views (FU-06):
+
+```bash
+curl "http://localhost:8090/finance/trial-balance"
+curl "http://localhost:8090/finance/pnl?period_start=2026-02-01T00:00:00Z&period_end=2026-03-01T00:00:00Z"
+curl "http://localhost:8090/finance/balance-sheet"
+curl "http://localhost:8090/finance/cash-flow?period_start=2026-02-01T00:00:00Z&period_end=2026-03-01T00:00:00Z"
+```
+
+Read revenue tracking and aging views (FU-06/FU-05 visibility):
+
+```bash
+curl "http://localhost:8090/revenue/tracking?period_start=2026-02-01T00:00:00Z&period_end=2026-03-01T00:00:00Z"
+curl "http://localhost:8090/finance/ar-aging"
+curl "http://localhost:8090/finance/ap-aging"
+```
+
 Read skill unit economics view (FR-056):
 
 ```bash
@@ -535,6 +552,7 @@ Note:
 - Channel adapters (`/origination/proofs/email`, `/origination/proofs/webhook`) now persist deduplicated origination proofs and can auto-create or link leads/opportunities/quotes/acceptances.
 - Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
 - Board pack now includes autonomy economics (`autonomy_operating_cost`, `margin_after_autonomy_cost`, `revenue_to_agent_payroll_ratio`, reconciliation status/variance).
+- Finance reporting endpoints now include `trial-balance`, `pnl`, `balance-sheet`, `cash-flow`, `revenue/tracking`, `ar-aging`, and `ap-aging` for board/investor review.
 - Skill unit economics is available at `/board/skills/unit-economics`, including skill-level token/cloud/subscription costs, attributed revenue, margin, and revenue-to-cost ratio.
 - Skill runtime telemetry is available at `/board/skills/telemetry` with success/failure/escalation/fallback rates and latency by skill version.
 - Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order, including `origination_proofs`.
