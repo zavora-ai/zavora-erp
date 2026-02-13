@@ -518,6 +518,91 @@ struct ListCorrectiveActionsResponse {
     items: Vec<StrategyCorrectiveActionView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestEmailProofRequest {
+    message_id: String,
+    from_email: String,
+    to_email: Option<String>,
+    subject: Option<String>,
+    body_excerpt: Option<String>,
+    metadata: Option<Value>,
+    contact_email: Option<String>,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    auto_create_lead: Option<bool>,
+    lead_note: Option<String>,
+    received_at: Option<DateTime<Utc>>,
+    requested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestWebhookProofRequest {
+    event_id: String,
+    source_system: String,
+    event_type: String,
+    contact_email: Option<String>,
+    payload: Option<Value>,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    auto_create_lead: Option<bool>,
+    lead_note: Option<String>,
+    received_at: Option<DateTime<Utc>>,
+    requested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OriginationProofResponse {
+    proof_id: Uuid,
+    proof_ref: String,
+    channel_type: String,
+    message_id: String,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    contact_email: Option<String>,
+    captured_at: DateTime<Utc>,
+    deduplicated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListOriginationProofsQuery {
+    channel_type: Option<String>,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OriginationProofView {
+    proof_id: Uuid,
+    proof_ref: String,
+    channel_type: String,
+    message_id: String,
+    contact_email: Option<String>,
+    subject: Option<String>,
+    source_ref: Option<String>,
+    payload_json: Value,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    captured_by_agent_id: String,
+    received_at: DateTime<Utc>,
+    captured_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListOriginationProofsResponse {
+    items: Vec<OriginationProofView>,
+}
+
 #[derive(Debug, Clone)]
 struct FulfilledOrder {
     order_id: Uuid,
@@ -562,6 +647,15 @@ async fn main() -> AnyResult<()> {
         .route("/origination/opportunities", post(create_opportunity))
         .route("/origination/quotes", post(create_quote))
         .route("/origination/quotes/{quote_id}/accept", post(accept_quote))
+        .route(
+            "/origination/proofs/email",
+            post(ingest_email_origination_proof),
+        )
+        .route(
+            "/origination/proofs/webhook",
+            post(ingest_webhook_origination_proof),
+        )
+        .route("/origination/proofs", get(list_origination_proofs))
         .route(
             "/strategy/offerings",
             get(list_strategy_offerings).post(upsert_strategy_offering),
@@ -1675,6 +1769,376 @@ async fn create_lead(
             created_at: now,
         }),
     ))
+}
+
+async fn ingest_email_origination_proof(
+    State(state): State<AppState>,
+    Json(payload): Json<IngestEmailProofRequest>,
+) -> Result<(StatusCode, Json<OriginationProofResponse>), (StatusCode, String)> {
+    let requested_by_agent_id = validate_agent_id(&payload.requested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let message_id = payload.message_id.trim();
+    if message_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message_id is required".to_string(),
+        ));
+    }
+
+    let from_email = payload.from_email.trim();
+    if from_email.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "from_email is required".to_string(),
+        ));
+    }
+
+    let to_email = payload
+        .to_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let subject = payload
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let body_excerpt = payload
+        .body_excerpt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let lead_note = payload
+        .lead_note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| subject.clone())
+        .or_else(|| body_excerpt.clone());
+    let contact_email = payload
+        .contact_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(from_email)
+        .to_string();
+    let auto_create_lead = payload.auto_create_lead.unwrap_or(true);
+
+    if let Some(existing) = lookup_origination_proof(&state.pool, "EMAIL", message_id).await? {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+    let links = validate_origination_links(
+        &mut tx,
+        payload.lead_id,
+        payload.opportunity_id,
+        payload.quote_id,
+        payload.acceptance_id,
+    )
+    .await?;
+    let lead_id = match links.lead_id {
+        Some(lead_id) => Some(lead_id),
+        None if auto_create_lead => Some(
+            create_linked_lead(
+                &mut tx,
+                &contact_email,
+                "EMAIL",
+                lead_note.as_deref(),
+                &requested_by_agent_id,
+            )
+            .await
+            .map_err(internal_error)?,
+        ),
+        _ => None,
+    };
+
+    let now = Utc::now();
+    let proof_id = Uuid::new_v4();
+    let proof_ref = format!("origination-proof:{proof_id}");
+    let received_at = payload.received_at.unwrap_or(now);
+
+    sqlx::query(
+        r#"
+        INSERT INTO origination_channel_proofs (
+            id,
+            proof_ref,
+            channel_type,
+            message_id,
+            contact_email,
+            subject,
+            source_ref,
+            payload_json,
+            lead_id,
+            opportunity_id,
+            quote_id,
+            acceptance_id,
+            captured_by_agent_id,
+            received_at,
+            captured_at
+        )
+        VALUES ($1, $2, 'EMAIL', $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
+        "#,
+    )
+    .bind(proof_id)
+    .bind(&proof_ref)
+    .bind(message_id)
+    .bind(&contact_email)
+    .bind(subject.as_deref())
+    .bind(format!("email:{message_id}"))
+    .bind(json!({
+        "from_email": from_email,
+        "to_email": to_email,
+        "subject": subject,
+        "body_excerpt": body_excerpt,
+        "metadata": payload.metadata.unwrap_or_else(|| json!({})),
+    }))
+    .bind(lead_id)
+    .bind(links.opportunity_id)
+    .bind(links.quote_id)
+    .bind(links.acceptance_id)
+    .bind(&requested_by_agent_id)
+    .bind(received_at)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    tx.commit().await.map_err(internal_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(OriginationProofResponse {
+            proof_id,
+            proof_ref,
+            channel_type: "EMAIL".to_string(),
+            message_id: message_id.to_string(),
+            lead_id,
+            opportunity_id: links.opportunity_id,
+            quote_id: links.quote_id,
+            acceptance_id: links.acceptance_id,
+            contact_email: Some(contact_email),
+            captured_at: now,
+            deduplicated: false,
+        }),
+    ))
+}
+
+async fn ingest_webhook_origination_proof(
+    State(state): State<AppState>,
+    Json(payload): Json<IngestWebhookProofRequest>,
+) -> Result<(StatusCode, Json<OriginationProofResponse>), (StatusCode, String)> {
+    let requested_by_agent_id = validate_agent_id(&payload.requested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let event_id = payload.event_id.trim();
+    if event_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "event_id is required".to_string()));
+    }
+    let source_system = payload.source_system.trim();
+    if source_system.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "source_system is required".to_string(),
+        ));
+    }
+    let event_type = payload.event_type.trim();
+    if event_type.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "event_type is required".to_string(),
+        ));
+    }
+    let contact_email = payload
+        .contact_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let lead_note = payload
+        .lead_note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some(format!("Webhook {} event {}", source_system, event_type)));
+    let auto_create_lead = payload.auto_create_lead.unwrap_or(true);
+
+    if let Some(existing) = lookup_origination_proof(&state.pool, "WEBHOOK", event_id).await? {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+    let links = validate_origination_links(
+        &mut tx,
+        payload.lead_id,
+        payload.opportunity_id,
+        payload.quote_id,
+        payload.acceptance_id,
+    )
+    .await?;
+    let lead_id = match (links.lead_id, auto_create_lead, contact_email.as_deref()) {
+        (Some(lead_id), _, _) => Some(lead_id),
+        (None, true, Some(contact_email)) => Some(
+            create_linked_lead(
+                &mut tx,
+                contact_email,
+                "WEBHOOK",
+                lead_note.as_deref(),
+                &requested_by_agent_id,
+            )
+            .await
+            .map_err(internal_error)?,
+        ),
+        _ => None,
+    };
+
+    let now = Utc::now();
+    let proof_id = Uuid::new_v4();
+    let proof_ref = format!("origination-proof:{proof_id}");
+    let received_at = payload.received_at.unwrap_or(now);
+
+    sqlx::query(
+        r#"
+        INSERT INTO origination_channel_proofs (
+            id,
+            proof_ref,
+            channel_type,
+            message_id,
+            contact_email,
+            subject,
+            source_ref,
+            payload_json,
+            lead_id,
+            opportunity_id,
+            quote_id,
+            acceptance_id,
+            captured_by_agent_id,
+            received_at,
+            captured_at
+        )
+        VALUES ($1, $2, 'WEBHOOK', $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
+        "#,
+    )
+    .bind(proof_id)
+    .bind(&proof_ref)
+    .bind(event_id)
+    .bind(contact_email.as_deref())
+    .bind(format!("{source_system}:{event_type}"))
+    .bind(format!("webhook:{source_system}:{event_id}"))
+    .bind(json!({
+        "source_system": source_system,
+        "event_type": event_type,
+        "payload": payload.payload.unwrap_or_else(|| json!({})),
+    }))
+    .bind(lead_id)
+    .bind(links.opportunity_id)
+    .bind(links.quote_id)
+    .bind(links.acceptance_id)
+    .bind(&requested_by_agent_id)
+    .bind(received_at)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    tx.commit().await.map_err(internal_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(OriginationProofResponse {
+            proof_id,
+            proof_ref,
+            channel_type: "WEBHOOK".to_string(),
+            message_id: event_id.to_string(),
+            lead_id,
+            opportunity_id: links.opportunity_id,
+            quote_id: links.quote_id,
+            acceptance_id: links.acceptance_id,
+            contact_email,
+            captured_at: now,
+            deduplicated: false,
+        }),
+    ))
+}
+
+async fn list_origination_proofs(
+    State(state): State<AppState>,
+    Query(query): Query<ListOriginationProofsQuery>,
+) -> Result<Json<ListOriginationProofsResponse>, (StatusCode, String)> {
+    let channel_type = query
+        .channel_type
+        .as_deref()
+        .map(normalize_origination_channel_type)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            proof_ref,
+            channel_type,
+            message_id,
+            contact_email,
+            subject,
+            source_ref,
+            payload_json,
+            lead_id,
+            opportunity_id,
+            quote_id,
+            acceptance_id,
+            captured_by_agent_id,
+            received_at,
+            captured_at
+        FROM origination_channel_proofs
+        WHERE ($1::text IS NULL OR channel_type = $1)
+          AND ($2::uuid IS NULL OR lead_id = $2)
+          AND ($3::uuid IS NULL OR opportunity_id = $3)
+          AND ($4::uuid IS NULL OR quote_id = $4)
+          AND ($5::uuid IS NULL OR acceptance_id = $5)
+        ORDER BY captured_at DESC
+        LIMIT $6
+        "#,
+    )
+    .bind(channel_type)
+    .bind(query.lead_id)
+    .bind(query.opportunity_id)
+    .bind(query.quote_id)
+    .bind(query.acceptance_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(OriginationProofView {
+            proof_id: row.try_get("id").map_err(internal_error)?,
+            proof_ref: row.try_get("proof_ref").map_err(internal_error)?,
+            channel_type: row.try_get("channel_type").map_err(internal_error)?,
+            message_id: row.try_get("message_id").map_err(internal_error)?,
+            contact_email: row.try_get("contact_email").map_err(internal_error)?,
+            subject: row.try_get("subject").map_err(internal_error)?,
+            source_ref: row.try_get("source_ref").map_err(internal_error)?,
+            payload_json: row.try_get("payload_json").map_err(internal_error)?,
+            lead_id: row.try_get("lead_id").map_err(internal_error)?,
+            opportunity_id: row.try_get("opportunity_id").map_err(internal_error)?,
+            quote_id: row.try_get("quote_id").map_err(internal_error)?,
+            acceptance_id: row.try_get("acceptance_id").map_err(internal_error)?,
+            captured_by_agent_id: row
+                .try_get("captured_by_agent_id")
+                .map_err(internal_error)?,
+            received_at: row.try_get("received_at").map_err(internal_error)?,
+            captured_at: row.try_get("captured_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListOriginationProofsResponse { items }))
 }
 
 async fn create_opportunity(
@@ -4013,6 +4477,223 @@ async fn derive_actual_metric_from_ledger(
     Ok(value.round_dp(4))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OriginationLinks {
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+}
+
+async fn lookup_origination_proof(
+    pool: &PgPool,
+    channel_type: &str,
+    message_id: &str,
+) -> Result<Option<OriginationProofResponse>, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            id,
+            proof_ref,
+            channel_type,
+            message_id,
+            lead_id,
+            opportunity_id,
+            quote_id,
+            acceptance_id,
+            contact_email,
+            captured_at
+        FROM origination_channel_proofs
+        WHERE channel_type = $1
+          AND message_id = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(channel_type)
+    .bind(message_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(internal_error)?;
+
+    if let Some(row) = row {
+        return Ok(Some(OriginationProofResponse {
+            proof_id: row.try_get("id").map_err(internal_error)?,
+            proof_ref: row.try_get("proof_ref").map_err(internal_error)?,
+            channel_type: row.try_get("channel_type").map_err(internal_error)?,
+            message_id: row.try_get("message_id").map_err(internal_error)?,
+            lead_id: row.try_get("lead_id").map_err(internal_error)?,
+            opportunity_id: row.try_get("opportunity_id").map_err(internal_error)?,
+            quote_id: row.try_get("quote_id").map_err(internal_error)?,
+            acceptance_id: row.try_get("acceptance_id").map_err(internal_error)?,
+            contact_email: row.try_get("contact_email").map_err(internal_error)?,
+            captured_at: row.try_get("captured_at").map_err(internal_error)?,
+            deduplicated: true,
+        }));
+    }
+
+    Ok(None)
+}
+
+async fn validate_origination_links(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+) -> Result<OriginationLinks, (StatusCode, String)> {
+    let mut resolved = OriginationLinks {
+        lead_id,
+        opportunity_id,
+        quote_id,
+        acceptance_id,
+    };
+
+    if let Some(lead_id) = resolved.lead_id {
+        let lead_exists =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM leads WHERE id = $1)")
+                .bind(lead_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(internal_error)?;
+        if !lead_exists {
+            return Err((StatusCode::NOT_FOUND, "lead not found".to_string()));
+        }
+    }
+
+    if let Some(opportunity_id) = resolved.opportunity_id {
+        let row = sqlx::query("SELECT lead_id FROM opportunities WHERE id = $1")
+            .bind(opportunity_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal_error)?;
+        let Some(row) = row else {
+            return Err((StatusCode::NOT_FOUND, "opportunity not found".to_string()));
+        };
+        let derived_lead_id: Uuid = row.try_get("lead_id").map_err(internal_error)?;
+        if let Some(lead_id) = resolved.lead_id {
+            if lead_id != derived_lead_id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "opportunity_id does not belong to lead_id".to_string(),
+                ));
+            }
+        } else {
+            resolved.lead_id = Some(derived_lead_id);
+        }
+    }
+
+    if let Some(quote_id) = resolved.quote_id {
+        let row = sqlx::query("SELECT opportunity_id FROM quotes WHERE id = $1")
+            .bind(quote_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal_error)?;
+        let Some(row) = row else {
+            return Err((StatusCode::NOT_FOUND, "quote not found".to_string()));
+        };
+        let derived_opportunity_id: Uuid = row.try_get("opportunity_id").map_err(internal_error)?;
+        if let Some(opportunity_id) = resolved.opportunity_id {
+            if opportunity_id != derived_opportunity_id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "quote_id does not belong to opportunity_id".to_string(),
+                ));
+            }
+        } else {
+            resolved.opportunity_id = Some(derived_opportunity_id);
+        }
+    }
+
+    if let Some(acceptance_id) = resolved.acceptance_id {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                qa.quote_id,
+                qa.opportunity_id,
+                o.lead_id
+            FROM quote_acceptances qa
+            INNER JOIN opportunities o ON o.id = qa.opportunity_id
+            WHERE qa.id = $1
+            "#,
+        )
+        .bind(acceptance_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(internal_error)?;
+        let Some(row) = row else {
+            return Err((StatusCode::NOT_FOUND, "acceptance not found".to_string()));
+        };
+        let derived_quote_id: Uuid = row.try_get("quote_id").map_err(internal_error)?;
+        let derived_opportunity_id: Uuid = row.try_get("opportunity_id").map_err(internal_error)?;
+        let derived_lead_id: Uuid = row.try_get("lead_id").map_err(internal_error)?;
+
+        if let Some(quote_id) = resolved.quote_id {
+            if quote_id != derived_quote_id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "acceptance_id does not belong to quote_id".to_string(),
+                ));
+            }
+        } else {
+            resolved.quote_id = Some(derived_quote_id);
+        }
+
+        if let Some(opportunity_id) = resolved.opportunity_id {
+            if opportunity_id != derived_opportunity_id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "acceptance_id does not belong to opportunity_id".to_string(),
+                ));
+            }
+        } else {
+            resolved.opportunity_id = Some(derived_opportunity_id);
+        }
+
+        if let Some(lead_id) = resolved.lead_id {
+            if lead_id != derived_lead_id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "acceptance_id does not belong to lead_id".to_string(),
+                ));
+            }
+        } else {
+            resolved.lead_id = Some(derived_lead_id);
+        }
+    }
+
+    Ok(resolved)
+}
+
+async fn create_linked_lead(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    contact_email: &str,
+    source_channel: &str,
+    note: Option<&str>,
+    requested_by_agent_id: &str,
+) -> AnyResult<Uuid> {
+    let lead_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    sqlx::query(
+        r#"
+        INSERT INTO leads (
+            id, contact_email, source_channel, note, status, requested_by_agent_id, created_at
+        )
+        VALUES ($1, $2, $3, $4, 'NEW', $5, $6)
+        "#,
+    )
+    .bind(lead_id)
+    .bind(contact_email)
+    .bind(source_channel)
+    .bind(note)
+    .bind(requested_by_agent_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(lead_id)
+}
+
 fn validate_order_request(payload: &CreateOrderRequest) -> AnyResult<(String, String)> {
     if payload.customer_email.trim().is_empty() {
         anyhow::bail!("customer_email is required");
@@ -4091,6 +4772,14 @@ fn normalize_transaction_type(value: &str) -> AnyResult<String> {
     match normalized.as_str() {
         "PRODUCT" | "SERVICE" => Ok(normalized),
         _ => anyhow::bail!("transaction_type must be PRODUCT or SERVICE"),
+    }
+}
+
+fn normalize_origination_channel_type(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "EMAIL" | "WEBHOOK" => Ok(normalized),
+        _ => anyhow::bail!("channel_type must be EMAIL or WEBHOOK"),
     }
 }
 

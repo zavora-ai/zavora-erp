@@ -122,6 +122,43 @@ curl http://localhost:8090/healthz
 curl http://localhost:8100/healthz
 ```
 
+Ingest an email origination proof (FU-02 `TSK-014`, auto-creates lead unless linked IDs are provided):
+
+```bash
+curl -X POST http://localhost:8080/origination/proofs/email \
+  -H 'content-type: application/json' \
+  -d '{
+    "message_id": "email-2026-02-13-001",
+    "from_email": "procurement@acme.com",
+    "to_email": "sales@zavora.ai",
+    "subject": "Need implementation service + starter bundle",
+    "body_excerpt": "Please share quote for implementation and SKU-001.",
+    "metadata": {"channel":"gmail","thread_id":"thread-42"},
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+Ingest a webhook origination proof (FU-02 `TSK-014`, supports service or product demand):
+
+```bash
+curl -X POST http://localhost:8080/origination/proofs/webhook \
+  -H 'content-type: application/json' \
+  -d '{
+    "event_id": "crm-evt-2026-02-13-001",
+    "source_system": "crm",
+    "event_type": "lead.created",
+    "contact_email": "buyer@acme.com",
+    "payload": {"campaign":"Q1-demo","segment":"SMB"},
+    "requested_by_agent_id": "sales-agent"
+  }'
+```
+
+List captured origination proofs:
+
+```bash
+curl "http://localhost:8080/origination/proofs?channel_type=EMAIL&limit=20"
+```
+
 Create a lead (business origination):
 
 ```bash
@@ -495,11 +532,12 @@ curl -X POST http://localhost:8100/memory/mcp/call \
 Note:
 - Current baseline supports both product and service transactions.
 - Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
+- Channel adapters (`/origination/proofs/email`, `/origination/proofs/webhook`) now persist deduplicated origination proofs and can auto-create or link leads/opportunities/quotes/acceptances.
 - Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
 - Board pack now includes autonomy economics (`autonomy_operating_cost`, `margin_after_autonomy_cost`, `revenue_to_agent_payroll_ratio`, reconciliation status/variance).
 - Skill unit economics is available at `/board/skills/unit-economics`, including skill-level token/cloud/subscription costs, attributed revenue, margin, and revenue-to-cost ratio.
 - Skill runtime telemetry is available at `/board/skills/telemetry` with success/failure/escalation/fallback rates and latency by skill version.
-- Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order.
+- Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order, including `origination_proofs`.
 - Audit evidence now includes `payroll_allocations` and margin-after-autonomy totals per order.
 - Audit evidence now includes `skill_invocations` so each autonomous skill attempt is traceable with status, retries, fallback, and hashes.
 - Audit evidence now includes semantic-memory provenance (`agent_memory_provenance`) for read/write/retention actions linked to order timelines.

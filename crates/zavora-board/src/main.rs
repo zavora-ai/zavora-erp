@@ -85,6 +85,7 @@ struct OrderEvidencePackage {
     opportunity: Option<AuditOpportunityRecord>,
     quote: Option<AuditQuoteRecord>,
     acceptance: Option<AuditAcceptanceRecord>,
+    origination_proofs: Vec<AuditOriginationProofRecord>,
     escalations: Vec<AuditEscalationRecord>,
     inventory_movements: Vec<AuditInventoryMovementRecord>,
     journals: Vec<AuditJournalRecord>,
@@ -168,6 +169,25 @@ struct AuditAcceptanceRecord {
     proof_ref: String,
     requested_by_agent_id: String,
     accepted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditOriginationProofRecord {
+    id: Uuid,
+    proof_ref: String,
+    channel_type: String,
+    message_id: String,
+    contact_email: Option<String>,
+    subject: Option<String>,
+    source_ref: Option<String>,
+    payload_json: serde_json::Value,
+    lead_id: Option<Uuid>,
+    opportunity_id: Option<Uuid>,
+    quote_id: Option<Uuid>,
+    acceptance_id: Option<Uuid>,
+    captured_by_agent_id: String,
+    received_at: DateTime<Utc>,
+    captured_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -908,6 +928,72 @@ async fn order_evidence(
         acceptance = Some(acceptance_record);
     }
 
+    let acceptance_id = acceptance.as_ref().map(|record| record.id);
+    let acceptance_proof_ref = acceptance.as_ref().map(|record| record.proof_ref.clone());
+    let quote_id = quote.as_ref().map(|record| record.id);
+    let opportunity_id = opportunity.as_ref().map(|record| record.id);
+    let lead_id = lead.as_ref().map(|record| record.id);
+
+    let origination_proof_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            proof_ref,
+            channel_type,
+            message_id,
+            contact_email,
+            subject,
+            source_ref,
+            payload_json,
+            lead_id,
+            opportunity_id,
+            quote_id,
+            acceptance_id,
+            captured_by_agent_id,
+            received_at,
+            captured_at
+        FROM origination_channel_proofs
+        WHERE
+            ($1::uuid IS NOT NULL AND lead_id = $1)
+            OR ($2::uuid IS NOT NULL AND opportunity_id = $2)
+            OR ($3::uuid IS NOT NULL AND quote_id = $3)
+            OR ($4::uuid IS NOT NULL AND acceptance_id = $4)
+            OR ($5::text IS NOT NULL AND proof_ref = $5)
+        ORDER BY captured_at
+        "#,
+    )
+    .bind(lead_id)
+    .bind(opportunity_id)
+    .bind(quote_id)
+    .bind(acceptance_id)
+    .bind(acceptance_proof_ref.as_deref())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut origination_proofs = Vec::with_capacity(origination_proof_rows.len());
+    for row in origination_proof_rows {
+        origination_proofs.push(AuditOriginationProofRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            proof_ref: row.try_get("proof_ref").map_err(internal_error)?,
+            channel_type: row.try_get("channel_type").map_err(internal_error)?,
+            message_id: row.try_get("message_id").map_err(internal_error)?,
+            contact_email: row.try_get("contact_email").map_err(internal_error)?,
+            subject: row.try_get("subject").map_err(internal_error)?,
+            source_ref: row.try_get("source_ref").map_err(internal_error)?,
+            payload_json: row.try_get("payload_json").map_err(internal_error)?,
+            lead_id: row.try_get("lead_id").map_err(internal_error)?,
+            opportunity_id: row.try_get("opportunity_id").map_err(internal_error)?,
+            quote_id: row.try_get("quote_id").map_err(internal_error)?,
+            acceptance_id: row.try_get("acceptance_id").map_err(internal_error)?,
+            captured_by_agent_id: row
+                .try_get("captured_by_agent_id")
+                .map_err(internal_error)?,
+            received_at: row.try_get("received_at").map_err(internal_error)?,
+            captured_at: row.try_get("captured_at").map_err(internal_error)?,
+        });
+    }
+
     let escalation_rows = sqlx::query(
         r#"
         SELECT
@@ -1210,6 +1296,18 @@ async fn order_evidence(
         });
     }
 
+    for proof in &origination_proofs {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: proof.captured_at,
+            event_type: "ORIGINATION_PROOF_CAPTURED".to_string(),
+            source: "origination_channel_proofs".to_string(),
+            details: format!(
+                "channel={} message_id={} proof_ref={}",
+                proof.channel_type, proof.message_id, proof.proof_ref
+            ),
+        });
+    }
+
     for escalation in &escalations {
         timeline.push(AuditTimelineEvent {
             occurred_at: escalation.created_at,
@@ -1402,6 +1500,7 @@ async fn order_evidence(
         opportunity,
         quote,
         acceptance,
+        origination_proofs,
         escalations,
         inventory_movements,
         journals,

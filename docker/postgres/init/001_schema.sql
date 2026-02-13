@@ -120,6 +120,36 @@ CREATE INDEX IF NOT EXISTS idx_quote_acceptances_quote_id ON quote_acceptances(q
 CREATE INDEX IF NOT EXISTS idx_quote_acceptances_order_id ON quote_acceptances(order_id);
 CREATE INDEX IF NOT EXISTS idx_quote_acceptances_accepted_at ON quote_acceptances(accepted_at);
 
+CREATE TABLE IF NOT EXISTS origination_channel_proofs (
+    id UUID PRIMARY KEY,
+    proof_ref TEXT NOT NULL UNIQUE,
+    channel_type TEXT NOT NULL CHECK (channel_type IN ('EMAIL', 'WEBHOOK')),
+    message_id TEXT NOT NULL,
+    contact_email TEXT,
+    subject TEXT,
+    source_ref TEXT,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    lead_id UUID REFERENCES leads(id),
+    opportunity_id UUID REFERENCES opportunities(id),
+    quote_id UUID REFERENCES quotes(id),
+    acceptance_id UUID REFERENCES quote_acceptances(id),
+    captured_by_agent_id TEXT NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (channel_type, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_origination_channel_proofs_lead_id
+    ON origination_channel_proofs(lead_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_origination_channel_proofs_opportunity_id
+    ON origination_channel_proofs(opportunity_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_origination_channel_proofs_quote_id
+    ON origination_channel_proofs(quote_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_origination_channel_proofs_acceptance_id
+    ON origination_channel_proofs(acceptance_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_origination_channel_proofs_channel_captured
+    ON origination_channel_proofs(channel_type, captured_at DESC);
+
 CREATE TABLE IF NOT EXISTS governance_thresholds (
     action_type TEXT PRIMARY KEY,
     max_auto_amount NUMERIC(20, 4) NOT NULL CHECK (max_auto_amount > 0),
