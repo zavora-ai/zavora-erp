@@ -328,6 +328,30 @@ Read board pack:
 curl http://localhost:8090/board/pack
 ```
 
+Read skill unit economics view (FR-056):
+
+```bash
+curl "http://localhost:8090/board/skills/unit-economics?period_start=2026-02-01T00:00:00Z&period_end=2026-03-01T00:00:00Z&limit=20"
+```
+
+Read skill runtime telemetry by skill/version:
+
+```bash
+curl "http://localhost:8090/board/skills/telemetry?limit=20"
+```
+
+List approved skill registry:
+
+```bash
+curl "http://localhost:8080/skills/registry?approval_status=APPROVED&limit=50"
+```
+
+List intent-to-skill routing policies:
+
+```bash
+curl "http://localhost:8080/skills/routing?limit=50"
+```
+
 Read audit evidence package for an order (replace `ORDER_ID`):
 
 ```bash
@@ -341,10 +365,11 @@ curl -X POST http://localhost:8100/memory/entries \
   -H 'content-type: application/json' \
   -d '{
     "agent_name": "sales-agent",
+    "actor_agent_id": "sales-agent",
     "scope": "ORDER",
     "content": "Customer accepted quote only after 2% discount and 14-day payment terms.",
     "keywords": ["discount", "payment-terms", "negotiation"],
-    "source_ref": "order:demo-001"
+    "source_ref": "proof:email:thread-2026-02-12-001"
   }'
 ```
 
@@ -355,9 +380,38 @@ curl -X POST http://localhost:8100/memory/search \
   -H 'content-type: application/json' \
   -d '{
     "agent_name": "sales-agent",
+    "requested_by_agent_id": "sales-agent",
     "query": "discount negotiation",
     "scope": "ORDER",
     "limit": 5
+  }'
+```
+
+Run semantic memory retention policy worker:
+
+```bash
+curl -X POST http://localhost:8100/memory/retention/run \
+  -H 'content-type: application/json' \
+  -d '{
+    "requested_by_agent_id": "audit-agent",
+    "dry_run": true
+  }'
+```
+
+Call memory tools via MCP-style endpoint:
+
+```bash
+curl -X POST http://localhost:8100/memory/mcp/call \
+  -H 'content-type: application/json' \
+  -d '{
+    "tool": "memory.search",
+    "input": {
+      "agent_name": "ops-orchestrator-agent",
+      "requested_by_agent_id": "ops-orchestrator-agent",
+      "query": "SKU-001",
+      "scope": "PRODUCT_EXECUTION",
+      "limit": 3
+    }
   }'
 ```
 
@@ -366,8 +420,12 @@ Note:
 - Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
 - Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
 - Board pack now includes autonomy economics (`autonomy_operating_cost`, `margin_after_autonomy_cost`, `revenue_to_agent_payroll_ratio`, reconciliation status/variance).
+- Skill unit economics is available at `/board/skills/unit-economics`, including skill-level token/cloud/subscription costs, attributed revenue, margin, and revenue-to-cost ratio.
+- Skill runtime telemetry is available at `/board/skills/telemetry` with success/failure/escalation/fallback rates and latency by skill version.
 - Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order.
 - Audit evidence now includes `payroll_allocations` and margin-after-autonomy totals per order.
+- Audit evidence now includes `skill_invocations` so each autonomous skill attempt is traceable with status, retries, fallback, and hashes.
+- Audit evidence now includes semantic-memory provenance (`agent_memory_provenance`) for read/write/retention actions linked to order timelines.
 
 ## 6) Functional Verification Evidence
 

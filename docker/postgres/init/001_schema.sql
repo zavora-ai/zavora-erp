@@ -225,6 +225,41 @@ CREATE INDEX IF NOT EXISTS idx_agent_semantic_memory_keywords
 CREATE INDEX IF NOT EXISTS idx_agent_semantic_memory_fts
     ON agent_semantic_memory USING GIN (to_tsvector('simple', content));
 
+CREATE TABLE IF NOT EXISTS agent_memory_provenance (
+    id UUID PRIMARY KEY,
+    memory_id UUID REFERENCES agent_semantic_memory(id) ON DELETE CASCADE,
+    entity_id UUID,
+    action_type TEXT NOT NULL CHECK (action_type IN ('WRITE', 'READ', 'RETENTION_PRUNE')),
+    actor_agent_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    query_text TEXT,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memory_provenance_memory_id
+    ON agent_memory_provenance(memory_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_provenance_entity_id
+    ON agent_memory_provenance(entity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_provenance_actor
+    ON agent_memory_provenance(actor_agent_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS memory_retention_policies (
+    scope TEXT PRIMARY KEY,
+    retention_days INTEGER NOT NULL CHECK (retention_days > 0),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_by_agent_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+INSERT INTO memory_retention_policies(scope, retention_days, enabled, updated_by_agent_id, updated_at)
+VALUES
+    ('ORDER', 365, TRUE, 'audit-agent', NOW()),
+    ('ORDER_EXECUTION', 365, TRUE, 'audit-agent', NOW()),
+    ('ORDER_COST_ALLOCATION', 365, TRUE, 'audit-agent', NOW()),
+    ('PRODUCT_EXECUTION', 365, TRUE, 'audit-agent', NOW()),
+    ('SERVICE_EXECUTION', 365, TRUE, 'audit-agent', NOW())
+ON CONFLICT (scope) DO NOTHING;
+
 INSERT INTO inventory_positions(item_code, on_hand, avg_cost, updated_at)
 VALUES
     ('SKU-001', 25.0000, 18.5000, NOW()),
@@ -324,8 +359,16 @@ CREATE TABLE IF NOT EXISTS finops_cost_allocations (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+DROP INDEX IF EXISTS idx_finops_cost_allocations_uniqueness;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_finops_cost_allocations_uniqueness
-    ON finops_cost_allocations(period_start, period_end, source_type, source_id, order_id);
+    ON finops_cost_allocations(
+        period_start,
+        period_end,
+        source_type,
+        source_id,
+        order_id,
+        COALESCE(skill_id, 'UNSPECIFIED')
+    );
 CREATE INDEX IF NOT EXISTS idx_finops_cost_allocations_period
     ON finops_cost_allocations(period_start, period_end);
 CREATE INDEX IF NOT EXISTS idx_finops_cost_allocations_order_id
@@ -349,3 +392,167 @@ CREATE TABLE IF NOT EXISTS finops_period_reconciliations (
 
 CREATE INDEX IF NOT EXISTS idx_finops_period_reconciliations_completed_at
     ON finops_period_reconciliations(completed_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_registry (
+    id UUID PRIMARY KEY,
+    skill_id TEXT NOT NULL,
+    skill_version TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    owner_agent_id TEXT NOT NULL,
+    approval_status TEXT NOT NULL CHECK (approval_status IN ('APPROVED', 'DRAFT', 'REVOKED')),
+    required_input_fields TEXT[] NOT NULL DEFAULT '{}',
+    required_output_fields TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (skill_id, skill_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_registry_capability_status
+    ON skill_registry(capability, approval_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_routing_policies (
+    intent TEXT NOT NULL,
+    transaction_type TEXT NOT NULL DEFAULT 'ANY' CHECK (transaction_type IN ('ANY', 'PRODUCT', 'SERVICE')),
+    capability TEXT NOT NULL,
+    primary_skill_id TEXT NOT NULL,
+    primary_skill_version TEXT NOT NULL,
+    fallback_skill_id TEXT,
+    fallback_skill_version TEXT,
+    max_retries INTEGER NOT NULL DEFAULT 1 CHECK (max_retries >= 0 AND max_retries <= 5),
+    escalation_action_type TEXT NOT NULL DEFAULT 'SKILL_EXECUTION',
+    updated_by_agent_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (intent, transaction_type)
+);
+
+CREATE TABLE IF NOT EXISTS skill_invocations (
+    id UUID PRIMARY KEY,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    intent TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    skill_id TEXT NOT NULL,
+    skill_version TEXT NOT NULL,
+    actor_agent_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+    status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'FAILED', 'ESCALATED')),
+    failure_reason TEXT,
+    fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+    input_hash TEXT NOT NULL,
+    output_hash TEXT,
+    latency_ms BIGINT NOT NULL CHECK (latency_ms >= 0),
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_order_id
+    ON skill_invocations(order_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_skill_version
+    ON skill_invocations(skill_id, skill_version, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_status_created
+    ON skill_invocations(status, created_at DESC);
+
+INSERT INTO skill_registry (
+    id,
+    skill_id,
+    skill_version,
+    capability,
+    owner_agent_id,
+    approval_status,
+    required_input_fields,
+    required_output_fields,
+    created_at,
+    updated_at
+)
+VALUES
+    (
+        uuid_generate_v4(),
+        'product-fulfillment',
+        '1.0.0',
+        'fulfillment-execution',
+        'ops-orchestrator-agent',
+        'APPROVED',
+        ARRAY['order_id', 'transaction_type', 'item_code', 'quantity', 'unit_price'],
+        ARRAY['execution_status', 'fulfillment_mode'],
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        'product-fulfillment-safe',
+        '1.0.0',
+        'fulfillment-execution',
+        'ops-orchestrator-agent',
+        'APPROVED',
+        ARRAY['order_id', 'transaction_type', 'item_code', 'quantity', 'unit_price'],
+        ARRAY['execution_status', 'fulfillment_mode'],
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        'service-delivery',
+        '1.0.0',
+        'service-delivery',
+        'ops-orchestrator-agent',
+        'APPROVED',
+        ARRAY['order_id', 'transaction_type', 'item_code', 'quantity', 'unit_price'],
+        ARRAY['execution_status', 'delivery_mode'],
+        NOW(),
+        NOW()
+    ),
+    (
+        uuid_generate_v4(),
+        'service-delivery-safe',
+        '1.0.0',
+        'service-delivery',
+        'ops-orchestrator-agent',
+        'APPROVED',
+        ARRAY['order_id', 'transaction_type', 'item_code', 'quantity', 'unit_price'],
+        ARRAY['execution_status', 'delivery_mode'],
+        NOW(),
+        NOW()
+    )
+ON CONFLICT (skill_id, skill_version) DO NOTHING;
+
+INSERT INTO skill_routing_policies (
+    intent,
+    transaction_type,
+    capability,
+    primary_skill_id,
+    primary_skill_version,
+    fallback_skill_id,
+    fallback_skill_version,
+    max_retries,
+    escalation_action_type,
+    updated_by_agent_id,
+    updated_at
+)
+VALUES
+    (
+        'ORDER_EXECUTION_PRODUCT',
+        'PRODUCT',
+        'fulfillment-execution',
+        'product-fulfillment',
+        '1.0.0',
+        'product-fulfillment-safe',
+        '1.0.0',
+        1,
+        'SKILL_EXECUTION_PRODUCT',
+        'board-agent',
+        NOW()
+    ),
+    (
+        'ORDER_EXECUTION_SERVICE',
+        'SERVICE',
+        'service-delivery',
+        'service-delivery',
+        '1.0.0',
+        'service-delivery-safe',
+        '1.0.0',
+        1,
+        'SKILL_EXECUTION_SERVICE',
+        'board-agent',
+        NOW()
+    )
+ON CONFLICT (intent, transaction_type) DO NOTHING;

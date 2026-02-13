@@ -142,12 +142,13 @@ pub struct BoardPack {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryWriteRequest {
     pub agent_name: String,
+    pub actor_agent_id: String,
     pub scope: String,
     pub entity_id: Option<Uuid>,
     pub content: String,
     #[serde(default)]
     pub keywords: Vec<String>,
-    pub source_ref: Option<String>,
+    pub source_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +160,7 @@ pub struct MemoryWriteResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchRequest {
     pub agent_name: String,
+    pub requested_by_agent_id: String,
     pub query: String,
     pub scope: Option<String>,
     pub entity_id: Option<Uuid>,

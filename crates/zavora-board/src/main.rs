@@ -3,12 +3,12 @@ use std::net::SocketAddr;
 use anyhow::Result as AnyResult;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use tracing::info;
 use uuid::Uuid;
@@ -17,6 +17,64 @@ use zavora_platform::{BoardPack, ServiceConfig, connect_database};
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillUnitEconomicsQuery {
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillTelemetryQuery {
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillUnitEconomicsResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    items: Vec<SkillUnitEconomicsRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillTelemetryResponse {
+    generated_at: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+    items: Vec<SkillTelemetryRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillUnitEconomicsRow {
+    skill_id: String,
+    orders_touched: i64,
+    token_cost: Decimal,
+    cloud_cost: Decimal,
+    subscription_cost: Decimal,
+    autonomy_cost: Decimal,
+    attributed_revenue: Decimal,
+    margin_after_autonomy_cost: Decimal,
+    revenue_to_cost_ratio: Decimal,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillTelemetryRow {
+    skill_id: String,
+    skill_version: String,
+    total_invocations: i64,
+    success_count: i64,
+    failed_count: i64,
+    escalated_count: i64,
+    fallback_count: i64,
+    success_rate_pct: Decimal,
+    escalation_rate_pct: Decimal,
+    avg_latency_ms: Decimal,
+    p95_latency_ms: Decimal,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,7 +90,9 @@ struct OrderEvidencePackage {
     journals: Vec<AuditJournalRecord>,
     settlements: Vec<AuditSettlementRecord>,
     payroll_allocations: Vec<AuditPayrollAllocationRecord>,
+    skill_invocations: Vec<AuditSkillInvocationRecord>,
     memories: Vec<AuditMemoryRecord>,
+    memory_provenance: Vec<AuditMemoryProvenanceRecord>,
     timeline: Vec<AuditTimelineEvent>,
     totals: AuditTotals,
 }
@@ -169,6 +229,25 @@ struct AuditPayrollAllocationRecord {
 }
 
 #[derive(Debug, Serialize)]
+struct AuditSkillInvocationRecord {
+    id: Uuid,
+    intent: String,
+    capability: String,
+    skill_id: String,
+    skill_version: String,
+    actor_agent_id: String,
+    attempt_no: i32,
+    status: String,
+    failure_reason: Option<String>,
+    fallback_used: bool,
+    input_hash: String,
+    output_hash: Option<String>,
+    latency_ms: i64,
+    started_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
 struct AuditMemoryRecord {
     id: Uuid,
     agent_name: String,
@@ -179,6 +258,18 @@ struct AuditMemoryRecord {
     created_at: DateTime<Utc>,
     access_count: i64,
     last_accessed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditMemoryProvenanceRecord {
+    id: Uuid,
+    memory_id: Option<Uuid>,
+    entity_id: Option<Uuid>,
+    action_type: String,
+    actor_agent_id: String,
+    source_ref: String,
+    query_text: Option<String>,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -215,6 +306,8 @@ async fn main() -> AnyResult<()> {
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/board/pack", get(board_pack))
+        .route("/board/skills/unit-economics", get(skill_unit_economics))
+        .route("/board/skills/telemetry", get(skill_telemetry))
         .route("/audit/orders/{order_id}/evidence", get(order_evidence))
         .with_state(state);
 
@@ -378,6 +471,216 @@ async fn board_pack(
     };
 
     Ok(Json(pack))
+}
+
+async fn skill_unit_economics(
+    State(state): State<AppState>,
+    Query(query): Query<SkillUnitEconomicsQuery>,
+) -> std::result::Result<Json<SkillUnitEconomicsResponse>, (axum::http::StatusCode, String)> {
+    if let (Some(period_start), Some(period_end)) = (query.period_start, query.period_end) {
+        if period_end <= period_start {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "period_end must be greater than period_start".to_string(),
+            ));
+        }
+    }
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let rows = sqlx::query(
+        r#"
+        WITH filtered_alloc AS (
+            SELECT
+                order_id,
+                COALESCE(NULLIF(BTRIM(skill_id), ''), 'UNSPECIFIED') AS skill_id,
+                source_type,
+                allocated_cost
+            FROM finops_cost_allocations
+            WHERE ($1::timestamptz IS NULL OR period_end > $1)
+              AND ($2::timestamptz IS NULL OR period_start < $2)
+        ),
+        order_skill_cost AS (
+            SELECT
+                order_id,
+                skill_id,
+                SUM(allocated_cost) AS skill_cost
+            FROM filtered_alloc
+            GROUP BY order_id, skill_id
+        ),
+        order_total_skill_cost AS (
+            SELECT
+                order_id,
+                SUM(skill_cost) AS total_skill_cost
+            FROM order_skill_cost
+            GROUP BY order_id
+        ),
+        skill_revenue AS (
+            SELECT
+                osc.skill_id,
+                SUM(
+                    (o.quantity * o.unit_price)
+                    * CASE
+                        WHEN otsc.total_skill_cost > 0
+                            THEN osc.skill_cost / otsc.total_skill_cost
+                        ELSE 0
+                      END
+                ) AS attributed_revenue
+            FROM order_skill_cost osc
+            INNER JOIN order_total_skill_cost otsc ON otsc.order_id = osc.order_id
+            INNER JOIN orders o ON o.id = osc.order_id AND o.status = 'FULFILLED'
+            GROUP BY osc.skill_id
+        ),
+        skill_costs AS (
+            SELECT
+                skill_id,
+                COUNT(DISTINCT order_id)::BIGINT AS orders_touched,
+                COALESCE(SUM(CASE WHEN source_type = 'TOKEN' THEN allocated_cost ELSE 0 END), 0) AS token_cost,
+                COALESCE(SUM(CASE WHEN source_type = 'CLOUD' THEN allocated_cost ELSE 0 END), 0) AS cloud_cost,
+                COALESCE(SUM(CASE WHEN source_type = 'SUBSCRIPTION' THEN allocated_cost ELSE 0 END), 0) AS subscription_cost,
+                COALESCE(SUM(allocated_cost), 0) AS autonomy_cost
+            FROM filtered_alloc
+            GROUP BY skill_id
+        )
+        SELECT
+            sc.skill_id,
+            sc.orders_touched,
+            sc.token_cost,
+            sc.cloud_cost,
+            sc.subscription_cost,
+            sc.autonomy_cost,
+            COALESCE(sr.attributed_revenue, 0) AS attributed_revenue
+        FROM skill_costs sc
+        LEFT JOIN skill_revenue sr ON sr.skill_id = sc.skill_id
+        ORDER BY sc.autonomy_cost DESC, sc.skill_id ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let autonomy_cost: Decimal = row.try_get("autonomy_cost").map_err(internal_error)?;
+        let attributed_revenue: Decimal =
+            row.try_get("attributed_revenue").map_err(internal_error)?;
+        let margin_after_autonomy_cost = (attributed_revenue - autonomy_cost).round_dp(4);
+        let revenue_to_cost_ratio = if autonomy_cost > Decimal::ZERO {
+            (attributed_revenue / autonomy_cost).round_dp(4)
+        } else {
+            Decimal::ZERO
+        };
+
+        items.push(SkillUnitEconomicsRow {
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+            orders_touched: row.try_get("orders_touched").map_err(internal_error)?,
+            token_cost: row.try_get("token_cost").map_err(internal_error)?,
+            cloud_cost: row.try_get("cloud_cost").map_err(internal_error)?,
+            subscription_cost: row.try_get("subscription_cost").map_err(internal_error)?,
+            autonomy_cost,
+            attributed_revenue,
+            margin_after_autonomy_cost,
+            revenue_to_cost_ratio,
+        });
+    }
+
+    Ok(Json(SkillUnitEconomicsResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        items,
+    }))
+}
+
+async fn skill_telemetry(
+    State(state): State<AppState>,
+    Query(query): Query<SkillTelemetryQuery>,
+) -> std::result::Result<Json<SkillTelemetryResponse>, (axum::http::StatusCode, String)> {
+    if let (Some(period_start), Some(period_end)) = (query.period_start, query.period_end) {
+        if period_end <= period_start {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "period_end must be greater than period_start".to_string(),
+            ));
+        }
+    }
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            skill_id,
+            skill_version,
+            COUNT(*)::BIGINT AS total_invocations,
+            COUNT(*) FILTER (WHERE status = 'SUCCESS')::BIGINT AS success_count,
+            COUNT(*) FILTER (WHERE status = 'FAILED')::BIGINT AS failed_count,
+            COUNT(*) FILTER (WHERE status = 'ESCALATED')::BIGINT AS escalated_count,
+            COUNT(*) FILTER (WHERE fallback_used = TRUE)::BIGINT AS fallback_count,
+            COALESCE(AVG(latency_ms)::numeric, 0) AS avg_latency_ms,
+            COALESCE((PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms))::numeric, 0::numeric) AS p95_latency_ms
+        FROM skill_invocations
+        WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+          AND ($2::timestamptz IS NULL OR created_at < $2)
+        GROUP BY skill_id, skill_version
+        ORDER BY total_invocations DESC, skill_id ASC, skill_version ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(query.period_start)
+    .bind(query.period_end)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let total_invocations: i64 = row.try_get("total_invocations").map_err(internal_error)?;
+        let success_count: i64 = row.try_get("success_count").map_err(internal_error)?;
+        let failed_count: i64 = row.try_get("failed_count").map_err(internal_error)?;
+        let escalated_count: i64 = row.try_get("escalated_count").map_err(internal_error)?;
+        let fallback_count: i64 = row.try_get("fallback_count").map_err(internal_error)?;
+        let avg_latency_ms: Decimal = row.try_get("avg_latency_ms").map_err(internal_error)?;
+        let p95_latency_ms: Decimal = row.try_get("p95_latency_ms").map_err(internal_error)?;
+
+        let success_rate_pct = if total_invocations > 0 {
+            (Decimal::from(success_count) / Decimal::from(total_invocations) * Decimal::new(100, 0))
+                .round_dp(4)
+        } else {
+            Decimal::ZERO
+        };
+        let escalation_rate_pct = if total_invocations > 0 {
+            (Decimal::from(escalated_count) / Decimal::from(total_invocations)
+                * Decimal::new(100, 0))
+            .round_dp(4)
+        } else {
+            Decimal::ZERO
+        };
+
+        items.push(SkillTelemetryRow {
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+            skill_version: row.try_get("skill_version").map_err(internal_error)?,
+            total_invocations,
+            success_count,
+            failed_count,
+            escalated_count,
+            fallback_count,
+            success_rate_pct,
+            escalation_rate_pct,
+            avg_latency_ms: avg_latency_ms.round_dp(4),
+            p95_latency_ms: p95_latency_ms.round_dp(4),
+        });
+    }
+
+    Ok(Json(SkillTelemetryResponse {
+        generated_at: Utc::now(),
+        period_start: query.period_start,
+        period_end: query.period_end,
+        items,
+    }))
 }
 
 async fn order_evidence(
@@ -763,6 +1066,55 @@ async fn order_evidence(
         });
     }
 
+    let skill_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            intent,
+            capability,
+            skill_id,
+            skill_version,
+            actor_agent_id,
+            attempt_no,
+            status,
+            failure_reason,
+            fallback_used,
+            input_hash,
+            output_hash,
+            latency_ms,
+            started_at,
+            completed_at
+        FROM skill_invocations
+        WHERE order_id = $1
+        ORDER BY started_at, created_at
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut skill_invocations = Vec::with_capacity(skill_rows.len());
+    for row in skill_rows {
+        skill_invocations.push(AuditSkillInvocationRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            intent: row.try_get("intent").map_err(internal_error)?,
+            capability: row.try_get("capability").map_err(internal_error)?,
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+            skill_version: row.try_get("skill_version").map_err(internal_error)?,
+            actor_agent_id: row.try_get("actor_agent_id").map_err(internal_error)?,
+            attempt_no: row.try_get("attempt_no").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            failure_reason: row.try_get("failure_reason").map_err(internal_error)?,
+            fallback_used: row.try_get("fallback_used").map_err(internal_error)?,
+            input_hash: row.try_get("input_hash").map_err(internal_error)?,
+            output_hash: row.try_get("output_hash").map_err(internal_error)?,
+            latency_ms: row.try_get("latency_ms").map_err(internal_error)?,
+            started_at: row.try_get("started_at").map_err(internal_error)?,
+            completed_at: row.try_get("completed_at").map_err(internal_error)?,
+        });
+    }
+
     let memory_rows = sqlx::query(
         r#"
         SELECT
@@ -797,6 +1149,41 @@ async fn order_evidence(
             created_at: row.try_get("created_at").map_err(internal_error)?,
             access_count: row.try_get("access_count").map_err(internal_error)?,
             last_accessed_at: row.try_get("last_accessed_at").map_err(internal_error)?,
+        });
+    }
+
+    let memory_provenance_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            memory_id,
+            entity_id,
+            action_type,
+            actor_agent_id,
+            source_ref,
+            query_text,
+            created_at
+        FROM agent_memory_provenance
+        WHERE entity_id = $1
+        ORDER BY created_at
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut memory_provenance = Vec::with_capacity(memory_provenance_rows.len());
+    for row in memory_provenance_rows {
+        memory_provenance.push(AuditMemoryProvenanceRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            memory_id: row.try_get("memory_id").map_err(internal_error)?,
+            entity_id: row.try_get("entity_id").map_err(internal_error)?,
+            action_type: row.try_get("action_type").map_err(internal_error)?,
+            actor_agent_id: row.try_get("actor_agent_id").map_err(internal_error)?,
+            source_ref: row.try_get("source_ref").map_err(internal_error)?,
+            query_text: row.try_get("query_text").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
         });
     }
 
@@ -885,11 +1272,33 @@ async fn order_evidence(
             event_type: "PAYROLL_COST_ALLOCATED".to_string(),
             source: "finops_cost_allocations".to_string(),
             details: format!(
-                "source_type={} basis={} allocated_cost={} {}",
+                "source_type={} basis={} skill={} allocated_cost={} {}",
                 allocation.source_type,
                 allocation.allocation_basis,
+                allocation
+                    .skill_id
+                    .clone()
+                    .unwrap_or_else(|| "UNSPECIFIED".to_string()),
                 allocation.allocated_cost,
                 allocation.currency
+            ),
+        });
+    }
+
+    for invocation in &skill_invocations {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: invocation.started_at,
+            event_type: "SKILL_INVOKED".to_string(),
+            source: "skill_invocations".to_string(),
+            details: format!(
+                "intent={} skill={}@{} attempt={} fallback_used={} status={} failure={}",
+                invocation.intent,
+                invocation.skill_id,
+                invocation.skill_version,
+                invocation.attempt_no,
+                invocation.fallback_used,
+                invocation.status,
+                invocation.failure_reason.clone().unwrap_or_default()
             ),
         });
     }
@@ -913,6 +1322,27 @@ async fn order_evidence(
                 memory.agent_name,
                 memory.scope,
                 memory.source_ref.clone().unwrap_or_default()
+            ),
+        });
+    }
+
+    for provenance in &memory_provenance {
+        let event_type = match provenance.action_type.as_str() {
+            "READ" => "MEMORY_RECALLED",
+            "WRITE" => "MEMORY_PROVENANCE_WRITE",
+            "RETENTION_PRUNE" => "MEMORY_RETENTION_PRUNE",
+            _ => "MEMORY_PROVENANCE",
+        };
+        timeline.push(AuditTimelineEvent {
+            occurred_at: provenance.created_at,
+            event_type: event_type.to_string(),
+            source: "agent_memory_provenance".to_string(),
+            details: format!(
+                "action={} actor={} source_ref={} query={}",
+                provenance.action_type,
+                provenance.actor_agent_id,
+                provenance.source_ref,
+                provenance.query_text.clone().unwrap_or_default()
             ),
         });
     }
@@ -977,7 +1407,9 @@ async fn order_evidence(
         journals,
         settlements,
         payroll_allocations,
+        skill_invocations,
         memories,
+        memory_provenance,
         timeline,
         totals: AuditTotals {
             line_value_total,

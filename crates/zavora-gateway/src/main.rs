@@ -218,6 +218,84 @@ struct AllocateCostsResponse {
     completed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpsertSkillRegistryRequest {
+    skill_id: String,
+    skill_version: String,
+    capability: String,
+    owner_agent_id: String,
+    approval_status: String,
+    required_input_fields: Vec<String>,
+    required_output_fields: Vec<String>,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillRegistryView {
+    skill_id: String,
+    skill_version: String,
+    capability: String,
+    owner_agent_id: String,
+    approval_status: String,
+    required_input_fields: Vec<String>,
+    required_output_fields: Vec<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListSkillRegistryResponse {
+    items: Vec<SkillRegistryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListSkillRegistryQuery {
+    capability: Option<String>,
+    approval_status: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpsertSkillRoutingRequest {
+    intent: String,
+    transaction_type: String,
+    capability: String,
+    primary_skill_id: String,
+    primary_skill_version: String,
+    fallback_skill_id: Option<String>,
+    fallback_skill_version: Option<String>,
+    max_retries: i32,
+    escalation_action_type: Option<String>,
+    updated_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillRoutingPolicyView {
+    intent: String,
+    transaction_type: String,
+    capability: String,
+    primary_skill_id: String,
+    primary_skill_version: String,
+    fallback_skill_id: Option<String>,
+    fallback_skill_version: Option<String>,
+    max_retries: i32,
+    escalation_action_type: String,
+    updated_by_agent_id: String,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListSkillRoutingResponse {
+    items: Vec<SkillRoutingPolicyView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListSkillRoutingQuery {
+    intent: Option<String>,
+    transaction_type: Option<String>,
+    limit: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 struct FulfilledOrder {
     order_id: Uuid,
@@ -269,6 +347,14 @@ async fn main() -> AnyResult<()> {
         .route("/finops/cloud-costs", post(ingest_cloud_cost))
         .route("/finops/subscriptions", post(ingest_subscription_cost))
         .route("/finops/allocate", post(allocate_costs))
+        .route(
+            "/skills/registry",
+            get(list_skill_registry).post(upsert_skill_registry),
+        )
+        .route(
+            "/skills/routing",
+            get(list_skill_routing).post(upsert_skill_routing),
+        )
         .route(
             "/governance/escalations/{escalation_id}/decide",
             post(decide_escalation),
@@ -1209,6 +1295,468 @@ async fn decide_escalation(
     }))
 }
 
+async fn upsert_skill_registry(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertSkillRegistryRequest>,
+) -> Result<Json<SkillRegistryView>, (StatusCode, String)> {
+    let actor = validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let owner_agent_id = validate_agent_id(&payload.owner_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let skill_id = payload.skill_id.trim();
+    if skill_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "skill_id is required".to_string()));
+    }
+    let skill_version = payload.skill_version.trim();
+    if skill_version.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "skill_version is required".to_string(),
+        ));
+    }
+    let capability = payload.capability.trim();
+    if capability.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "capability is required".to_string(),
+        ));
+    }
+
+    let approval_status = normalize_skill_approval_status(&payload.approval_status)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let required_input_fields = normalize_required_fields(&payload.required_input_fields)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let required_output_fields = normalize_required_fields(&payload.required_output_fields)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let now = Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO skill_registry (
+            id,
+            skill_id,
+            skill_version,
+            capability,
+            owner_agent_id,
+            approval_status,
+            required_input_fields,
+            required_output_fields,
+            created_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+        ON CONFLICT (skill_id, skill_version)
+        DO UPDATE SET
+            capability = EXCLUDED.capability,
+            owner_agent_id = EXCLUDED.owner_agent_id,
+            approval_status = EXCLUDED.approval_status,
+            required_input_fields = EXCLUDED.required_input_fields,
+            required_output_fields = EXCLUDED.required_output_fields,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(skill_id)
+    .bind(skill_version)
+    .bind(capability)
+    .bind(&owner_agent_id)
+    .bind(&approval_status)
+    .bind(&required_input_fields)
+    .bind(&required_output_fields)
+    .bind(now)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            skill_id,
+            skill_version,
+            capability,
+            owner_agent_id,
+            approval_status,
+            required_input_fields,
+            required_output_fields,
+            created_at,
+            updated_at
+        FROM skill_registry
+        WHERE skill_id = $1 AND skill_version = $2
+        "#,
+    )
+    .bind(skill_id)
+    .bind(skill_version)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let view = SkillRegistryView {
+        skill_id: row.try_get("skill_id").map_err(internal_error)?,
+        skill_version: row.try_get("skill_version").map_err(internal_error)?,
+        capability: row.try_get("capability").map_err(internal_error)?,
+        owner_agent_id: row.try_get("owner_agent_id").map_err(internal_error)?,
+        approval_status: row.try_get("approval_status").map_err(internal_error)?,
+        required_input_fields: row
+            .try_get("required_input_fields")
+            .map_err(internal_error)?,
+        required_output_fields: row
+            .try_get("required_output_fields")
+            .map_err(internal_error)?,
+        created_at: row.try_get("created_at").map_err(internal_error)?,
+        updated_at: row.try_get("updated_at").map_err(internal_error)?,
+    };
+
+    info!(
+        "skill registry upserted skill={} version={} by {}",
+        view.skill_id, view.skill_version, actor
+    );
+    Ok(Json(view))
+}
+
+async fn list_skill_registry(
+    State(state): State<AppState>,
+    Query(query): Query<ListSkillRegistryQuery>,
+) -> Result<Json<ListSkillRegistryResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let approval_status = query
+        .approval_status
+        .as_deref()
+        .map(normalize_skill_approval_status)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let capability = query
+        .capability
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            skill_id,
+            skill_version,
+            capability,
+            owner_agent_id,
+            approval_status,
+            required_input_fields,
+            required_output_fields,
+            created_at,
+            updated_at
+        FROM skill_registry
+        WHERE ($1::text IS NULL OR capability = $1)
+          AND ($2::text IS NULL OR approval_status = $2)
+        ORDER BY updated_at DESC, skill_id ASC, skill_version ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(capability)
+    .bind(approval_status)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(SkillRegistryView {
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+            skill_version: row.try_get("skill_version").map_err(internal_error)?,
+            capability: row.try_get("capability").map_err(internal_error)?,
+            owner_agent_id: row.try_get("owner_agent_id").map_err(internal_error)?,
+            approval_status: row.try_get("approval_status").map_err(internal_error)?,
+            required_input_fields: row
+                .try_get("required_input_fields")
+                .map_err(internal_error)?,
+            required_output_fields: row
+                .try_get("required_output_fields")
+                .map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListSkillRegistryResponse { items }))
+}
+
+async fn upsert_skill_routing(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertSkillRoutingRequest>,
+) -> Result<Json<SkillRoutingPolicyView>, (StatusCode, String)> {
+    let actor = validate_governance_actor(&payload.updated_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let intent = payload.intent.trim().to_ascii_uppercase();
+    if intent.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "intent is required".to_string()));
+    }
+    let transaction_type = normalize_routing_transaction_type(&payload.transaction_type)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let capability = payload.capability.trim().to_string();
+    if capability.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "capability is required".to_string(),
+        ));
+    }
+
+    let primary_skill_id = payload.primary_skill_id.trim().to_string();
+    let primary_skill_version = payload.primary_skill_version.trim().to_string();
+    if primary_skill_id.is_empty() || primary_skill_version.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "primary_skill_id and primary_skill_version are required".to_string(),
+        ));
+    }
+
+    let fallback_skill_id = payload
+        .fallback_skill_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let fallback_skill_version = payload
+        .fallback_skill_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if fallback_skill_id.is_some() ^ fallback_skill_version.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "fallback_skill_id and fallback_skill_version must be provided together".to_string(),
+        ));
+    }
+    if !(0..=5).contains(&payload.max_retries) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_retries must be between 0 and 5".to_string(),
+        ));
+    }
+
+    let escalation_action_type = payload
+        .escalation_action_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("SKILL_EXECUTION")
+        .to_ascii_uppercase();
+
+    let primary_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM skill_registry
+            WHERE skill_id = $1
+              AND skill_version = $2
+              AND approval_status = 'APPROVED'
+        )
+        "#,
+    )
+    .bind(&primary_skill_id)
+    .bind(&primary_skill_version)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+    if !primary_exists {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "primary skill must exist in APPROVED status".to_string(),
+        ));
+    }
+
+    if let (Some(fallback_id), Some(fallback_version)) = (
+        fallback_skill_id.as_deref(),
+        fallback_skill_version.as_deref(),
+    ) {
+        let fallback_exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM skill_registry
+                WHERE skill_id = $1
+                  AND skill_version = $2
+                  AND approval_status = 'APPROVED'
+            )
+            "#,
+        )
+        .bind(fallback_id)
+        .bind(fallback_version)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(internal_error)?;
+        if !fallback_exists {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "fallback skill must exist in APPROVED status".to_string(),
+            ));
+        }
+    }
+
+    let now = Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO skill_routing_policies (
+            intent,
+            transaction_type,
+            capability,
+            primary_skill_id,
+            primary_skill_version,
+            fallback_skill_id,
+            fallback_skill_version,
+            max_retries,
+            escalation_action_type,
+            updated_by_agent_id,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (intent, transaction_type)
+        DO UPDATE SET
+            capability = EXCLUDED.capability,
+            primary_skill_id = EXCLUDED.primary_skill_id,
+            primary_skill_version = EXCLUDED.primary_skill_version,
+            fallback_skill_id = EXCLUDED.fallback_skill_id,
+            fallback_skill_version = EXCLUDED.fallback_skill_version,
+            max_retries = EXCLUDED.max_retries,
+            escalation_action_type = EXCLUDED.escalation_action_type,
+            updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(&intent)
+    .bind(&transaction_type)
+    .bind(&capability)
+    .bind(&primary_skill_id)
+    .bind(&primary_skill_version)
+    .bind(&fallback_skill_id)
+    .bind(&fallback_skill_version)
+    .bind(payload.max_retries)
+    .bind(&escalation_action_type)
+    .bind(&actor)
+    .bind(now)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            intent,
+            transaction_type,
+            capability,
+            primary_skill_id,
+            primary_skill_version,
+            fallback_skill_id,
+            fallback_skill_version,
+            max_retries,
+            escalation_action_type,
+            updated_by_agent_id,
+            updated_at
+        FROM skill_routing_policies
+        WHERE intent = $1 AND transaction_type = $2
+        "#,
+    )
+    .bind(&intent)
+    .bind(&transaction_type)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(SkillRoutingPolicyView {
+        intent: row.try_get("intent").map_err(internal_error)?,
+        transaction_type: row.try_get("transaction_type").map_err(internal_error)?,
+        capability: row.try_get("capability").map_err(internal_error)?,
+        primary_skill_id: row.try_get("primary_skill_id").map_err(internal_error)?,
+        primary_skill_version: row
+            .try_get("primary_skill_version")
+            .map_err(internal_error)?,
+        fallback_skill_id: row.try_get("fallback_skill_id").map_err(internal_error)?,
+        fallback_skill_version: row
+            .try_get("fallback_skill_version")
+            .map_err(internal_error)?,
+        max_retries: row.try_get("max_retries").map_err(internal_error)?,
+        escalation_action_type: row
+            .try_get("escalation_action_type")
+            .map_err(internal_error)?,
+        updated_by_agent_id: row.try_get("updated_by_agent_id").map_err(internal_error)?,
+        updated_at: row.try_get("updated_at").map_err(internal_error)?,
+    }))
+}
+
+async fn list_skill_routing(
+    State(state): State<AppState>,
+    Query(query): Query<ListSkillRoutingQuery>,
+) -> Result<Json<ListSkillRoutingResponse>, (StatusCode, String)> {
+    let intent = query
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+    let transaction_type = query
+        .transaction_type
+        .as_deref()
+        .map(normalize_routing_transaction_type)
+        .transpose()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            intent,
+            transaction_type,
+            capability,
+            primary_skill_id,
+            primary_skill_version,
+            fallback_skill_id,
+            fallback_skill_version,
+            max_retries,
+            escalation_action_type,
+            updated_by_agent_id,
+            updated_at
+        FROM skill_routing_policies
+        WHERE ($1::text IS NULL OR intent = $1)
+          AND ($2::text IS NULL OR transaction_type = $2)
+        ORDER BY updated_at DESC, intent ASC, transaction_type ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(intent)
+    .bind(transaction_type)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(SkillRoutingPolicyView {
+            intent: row.try_get("intent").map_err(internal_error)?,
+            transaction_type: row.try_get("transaction_type").map_err(internal_error)?,
+            capability: row.try_get("capability").map_err(internal_error)?,
+            primary_skill_id: row.try_get("primary_skill_id").map_err(internal_error)?,
+            primary_skill_version: row
+                .try_get("primary_skill_version")
+                .map_err(internal_error)?,
+            fallback_skill_id: row.try_get("fallback_skill_id").map_err(internal_error)?,
+            fallback_skill_version: row
+                .try_get("fallback_skill_version")
+                .map_err(internal_error)?,
+            max_retries: row.try_get("max_retries").map_err(internal_error)?,
+            escalation_action_type: row
+                .try_get("escalation_action_type")
+                .map_err(internal_error)?,
+            updated_by_agent_id: row.try_get("updated_by_agent_id").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(ListSkillRoutingResponse { items }))
+}
+
 async fn ingest_token_usage(
     State(state): State<AppState>,
     Json(payload): Json<IngestTokenUsageRequest>,
@@ -1265,6 +1813,11 @@ async fn ingest_token_usage(
     let stored_at = Utc::now();
     let usage_id = Uuid::new_v4();
     let currency = normalize_currency(&payload.currency).map_err(invalid_request)?;
+    let skill_id = payload
+        .skill_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     sqlx::query(
         r#"
@@ -1279,7 +1832,7 @@ async fn ingest_token_usage(
     .bind(usage_id)
     .bind(payload.order_id)
     .bind(agent_id)
-    .bind(payload.skill_id.as_deref().map(str::trim))
+    .bind(skill_id)
     .bind(payload.action_name.trim())
     .bind(payload.input_tokens)
     .bind(payload.output_tokens)
@@ -1680,6 +2233,8 @@ async fn allocate_costs(
         .map_err(internal_error)?;
         journal_total += rounded_cost;
 
+        let memory_id = Uuid::new_v4();
+        let memory_source_ref = format!("finops-period:{period_key}");
         sqlx::query(
             r#"
             INSERT INTO agent_semantic_memory (
@@ -1688,7 +2243,7 @@ async fn allocate_costs(
             VALUES ($1, 'payroll-agent', 'ORDER_COST_ALLOCATION', $2, $3, $4, $5, $6)
             "#,
         )
-        .bind(Uuid::new_v4())
+        .bind(memory_id)
         .bind(order_id)
         .bind(format!(
             "Allocated autonomous operating cost {} {} for order {} in period {} to {}",
@@ -1699,7 +2254,25 @@ async fn allocate_costs(
             "allocation".to_string(),
             "autonomy-cost".to_string(),
         ])
-        .bind(format!("finops-period:{period_key}"))
+        .bind(&memory_source_ref)
+        .bind(completed_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO agent_memory_provenance (
+                id, memory_id, entity_id, action_type, actor_agent_id, source_ref, query_text, created_at
+            )
+            VALUES ($1, $2, $3, 'WRITE', $4, $5, NULL, $6)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(memory_id)
+        .bind(order_id)
+        .bind("payroll-agent")
+        .bind(&memory_source_ref)
         .bind(completed_at)
         .execute(&mut *tx)
         .await
@@ -1864,34 +2437,129 @@ async fn allocate_input_cost(
             continue;
         }
 
-        sqlx::query(
-            r#"
-            INSERT INTO finops_cost_allocations (
-                id, period_start, period_end, order_id, source_type, source_id, agent_id,
-                skill_id, allocation_basis, allocated_cost, currency, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
+        let skill_allocations = split_amount_by_skill(
+            tx,
+            period_start,
+            period_end,
+            order_id,
+            amount,
+            input.skill_id.as_deref(),
         )
-        .bind(Uuid::new_v4())
-        .bind(period_start)
-        .bind(period_end)
-        .bind(order_id)
-        .bind(input.source_type)
-        .bind(input.source_id)
-        .bind(input.agent_id.as_deref())
-        .bind(input.skill_id.as_deref())
-        .bind(basis)
-        .bind(amount.round_dp(4))
-        .bind(input.currency.as_str())
-        .bind(Utc::now())
-        .execute(&mut **tx)
         .await?;
 
-        allocated_total += amount;
+        for (skill_id, skill_amount) in skill_allocations {
+            if skill_amount <= Decimal::ZERO {
+                continue;
+            }
+
+            sqlx::query(
+                r#"
+                INSERT INTO finops_cost_allocations (
+                    id, period_start, period_end, order_id, source_type, source_id, agent_id,
+                    skill_id, allocation_basis, allocated_cost, currency, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(period_start)
+            .bind(period_end)
+            .bind(order_id)
+            .bind(input.source_type)
+            .bind(input.source_id)
+            .bind(input.agent_id.as_deref())
+            .bind(skill_id.as_deref())
+            .bind(basis)
+            .bind(skill_amount.round_dp(4))
+            .bind(input.currency.as_str())
+            .bind(Utc::now())
+            .execute(&mut **tx)
+            .await?;
+
+            allocated_total += skill_amount;
+        }
     }
 
     Ok(allocated_total.round_dp(4))
+}
+
+async fn split_amount_by_skill(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    order_id: Uuid,
+    amount: Decimal,
+    explicit_skill_id: Option<&str>,
+) -> AnyResult<Vec<(Option<String>, Decimal)>> {
+    let amount = amount.round_dp(4);
+    if amount <= Decimal::ZERO {
+        return Ok(Vec::new());
+    }
+
+    if let Some(skill_id) = explicit_skill_id {
+        let trimmed = skill_id.trim();
+        if !trimmed.is_empty() {
+            return Ok(vec![(Some(trimmed.to_string()), amount)]);
+        }
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            skill_id,
+            COALESCE(SUM(total_cost), 0) AS skill_cost
+        FROM finops_token_usage
+        WHERE order_id = $1
+          AND occurred_at >= $2
+          AND occurred_at < $3
+          AND skill_id IS NOT NULL
+          AND BTRIM(skill_id) <> ''
+        GROUP BY skill_id
+        HAVING COALESCE(SUM(total_cost), 0) > 0
+        ORDER BY skill_id
+        "#,
+    )
+    .bind(order_id)
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(vec![(None, amount)]);
+    }
+
+    let mut weighted_skills: Vec<(String, Decimal)> = Vec::with_capacity(rows.len());
+    let mut total_weight = Decimal::ZERO;
+    for row in rows {
+        let skill_id: String = row.try_get("skill_id")?;
+        let skill_cost: Decimal = row.try_get("skill_cost")?;
+        let rounded_cost = skill_cost.round_dp(4);
+        if rounded_cost > Decimal::ZERO {
+            weighted_skills.push((skill_id, rounded_cost));
+            total_weight += rounded_cost;
+        }
+    }
+
+    if weighted_skills.is_empty() || total_weight <= Decimal::ZERO {
+        return Ok(vec![(None, amount)]);
+    }
+
+    let mut distributed: Vec<(Option<String>, Decimal)> = Vec::with_capacity(weighted_skills.len());
+    let mut remaining = amount;
+    for (idx, (skill_id, weight)) in weighted_skills.iter().enumerate() {
+        let skill_amount = if idx == weighted_skills.len() - 1 {
+            remaining.round_dp(4)
+        } else {
+            let provisional = (amount * *weight / total_weight).round_dp(4);
+            remaining = (remaining - provisional).round_dp(4);
+            provisional
+        };
+
+        distributed.push((Some(skill_id.clone()), skill_amount));
+    }
+
+    Ok(distributed)
 }
 
 async fn insert_journal_line(
@@ -2142,6 +2810,39 @@ fn normalize_decision_status(value: &str) -> AnyResult<String> {
     match normalized.as_str() {
         "PENDING" | "APPROVED" | "REJECTED" | "FROZEN" => Ok(normalized),
         _ => anyhow::bail!("status must be one of PENDING, APPROVED, REJECTED, FROZEN"),
+    }
+}
+
+fn normalize_skill_approval_status(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "APPROVED" | "DRAFT" | "REVOKED" => Ok(normalized),
+        _ => anyhow::bail!("approval_status must be APPROVED, DRAFT, or REVOKED"),
+    }
+}
+
+fn normalize_required_fields(fields: &[String]) -> AnyResult<Vec<String>> {
+    let mut normalized: Vec<String> = fields
+        .iter()
+        .map(|field| field.trim())
+        .filter(|field| !field.is_empty())
+        .map(str::to_string)
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+
+    if normalized.is_empty() {
+        anyhow::bail!("at least one required field must be provided");
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_routing_transaction_type(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "ANY" | "PRODUCT" | "SERVICE" => Ok(normalized),
+        _ => anyhow::bail!("transaction_type must be ANY, PRODUCT, or SERVICE"),
     }
 }
 
