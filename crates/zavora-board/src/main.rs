@@ -964,12 +964,36 @@ async fn revenue_tracking(
 
     let billed_row = sqlx::query(
         r#"
+        WITH invoice_orders AS (
+            SELECT DISTINCT order_id
+            FROM invoices
+            WHERE status <> 'VOID'
+              AND ($1::timestamptz IS NULL OR issued_at >= $1)
+              AND ($2::timestamptz IS NULL OR issued_at < $2)
+        ),
+        invoice_billing AS (
+            SELECT COALESCE(SUM(amount), 0) AS billed_revenue
+            FROM invoices
+            WHERE status <> 'VOID'
+              AND ($1::timestamptz IS NULL OR issued_at >= $1)
+              AND ($2::timestamptz IS NULL OR issued_at < $2)
+        ),
+        legacy_journal_billing AS (
+            SELECT COALESCE(SUM(j.credit - j.debit), 0) AS billed_revenue
+            FROM journals j
+            WHERE j.account = '4000'
+              AND ($1::timestamptz IS NULL OR j.posted_at >= $1)
+              AND ($2::timestamptz IS NULL OR j.posted_at < $2)
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM invoice_orders io
+                    WHERE io.order_id = j.order_id
+              )
+        )
         SELECT
-            COALESCE(SUM(credit - debit), 0) AS billed_revenue
-        FROM journals
-        WHERE account = '4000'
-          AND ($1::timestamptz IS NULL OR posted_at >= $1)
-          AND ($2::timestamptz IS NULL OR posted_at < $2)
+            (SELECT billed_revenue FROM invoice_billing)
+            + (SELECT billed_revenue FROM legacy_journal_billing)
+            AS billed_revenue
         "#,
     )
     .bind(query.period_start)
@@ -1060,26 +1084,18 @@ async fn ar_aging(
         r#"
         WITH ar_balances AS (
             SELECT
-                order_id,
-                COALESCE(SUM(debit - credit), 0) AS outstanding_ar
-            FROM journals
-            WHERE account = '1100'
-            GROUP BY order_id
-        ),
-        ar_enriched AS (
-            SELECT
-                o.id AS order_id,
-                o.customer_email,
-                COALESCE(
-                    qa.accepted_at + make_interval(days => q.payment_terms_days),
-                    o.created_at + interval '30 day'
-                ) AS due_at,
-                ab.outstanding_ar
-            FROM ar_balances ab
-            INNER JOIN orders o ON o.id = ab.order_id
-            LEFT JOIN quote_acceptances qa ON qa.order_id = o.id
-            LEFT JOIN quotes q ON q.id = qa.quote_id
-            WHERE ab.outstanding_ar > 0
+                i.id AS invoice_id,
+                i.order_id,
+                i.customer_email,
+                i.due_at,
+                COALESCE(SUM(ase.debit - ase.credit), 0) AS outstanding_ar
+            FROM invoices i
+            LEFT JOIN ar_subledger_entries ase
+                ON ase.invoice_id = i.id
+               AND ase.posted_at <= $1
+            WHERE i.status <> 'VOID'
+              AND i.issued_at <= $1
+            GROUP BY i.id, i.order_id, i.customer_email, i.due_at
         )
         SELECT
             order_id,
@@ -1087,7 +1103,8 @@ async fn ar_aging(
             due_at,
             (EXTRACT(EPOCH FROM ($1::timestamptz - due_at)) / 86400)::BIGINT AS age_days,
             outstanding_ar
-        FROM ar_enriched
+        FROM ar_balances
+        WHERE outstanding_ar > 0
         ORDER BY due_at ASC, order_id ASC
         LIMIT $2
         "#,
@@ -1137,22 +1154,21 @@ async fn ap_aging(
         r#"
         WITH ap_balances AS (
             SELECT
-                order_id,
-                account,
-                COALESCE(SUM(credit - debit), 0) AS outstanding_ap
-            FROM journals
-            WHERE account IN ('2100', '2200')
-            GROUP BY order_id, account
-        ),
-        ap_enriched AS (
-            SELECT
-                o.id AS order_id,
-                ap.account,
-                COALESCE(o.fulfilled_at, o.created_at) + interval '30 day' AS due_at,
-                ap.outstanding_ap
-            FROM ap_balances ap
-            INNER JOIN orders o ON o.id = ap.order_id
-            WHERE ap.outstanding_ap > 0
+                apo.id AS ap_obligation_id,
+                apo.order_id,
+                CASE
+                    WHEN apo.source_type = 'PROCUREMENT' THEN '2100'
+                    ELSE '2200'
+                END AS account,
+                apo.due_at,
+                COALESCE(SUM(ase.credit - ase.debit), 0) AS outstanding_ap
+            FROM ap_obligations apo
+            LEFT JOIN ap_subledger_entries ase
+                ON ase.ap_obligation_id = apo.id
+               AND ase.posted_at <= $1
+            WHERE apo.status <> 'CANCELLED'
+              AND apo.created_at <= $1
+            GROUP BY apo.id, apo.order_id, apo.source_type, apo.due_at
         )
         SELECT
             order_id,
@@ -1160,7 +1176,8 @@ async fn ap_aging(
             due_at,
             (EXTRACT(EPOCH FROM ($1::timestamptz - due_at)) / 86400)::BIGINT AS age_days,
             outstanding_ap
-        FROM ap_enriched
+        FROM ap_balances
+        WHERE outstanding_ap > 0
         ORDER BY due_at ASC, order_id ASC, account ASC
         LIMIT $2
         "#,

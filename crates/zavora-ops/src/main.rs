@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures_util::StreamExt;
 use redis::Msg;
 use rust_decimal::Decimal;
@@ -20,6 +20,9 @@ const COGS_ACCOUNT: &str = "5000";
 const CASH_ACCOUNT: &str = "1000";
 const SERVICE_COST_CLEARING_ACCOUNT: &str = "2100";
 const OPS_AGENT_ID: &str = "ops-orchestrator-agent";
+const AP_DEFAULT_TERMS_DAYS: i64 = 30;
+const COUNTERPARTY_PROCUREMENT_AUTO: &str = "supplier:auto";
+const COUNTERPARTY_SERVICE_AUTO: &str = "service-partner:auto";
 const MEMORY_SCOPE_ORDER_EXECUTION: &str = "ORDER_EXECUTION";
 const MEMORY_SCOPE_PRODUCT_EXECUTION: &str = "PRODUCT_EXECUTION";
 const MEMORY_SCOPE_SERVICE_EXECUTION: &str = "SERVICE_EXECUTION";
@@ -51,6 +54,13 @@ struct SkillExecutionContext {
     unit_price: Decimal,
     currency: String,
     transaction_type: TransactionType,
+}
+
+#[derive(Debug, Clone)]
+struct InventoryExecutionResult {
+    on_hand: Decimal,
+    avg_cost: Decimal,
+    procurement_liability: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -140,7 +150,7 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
     let mut tx = pool.begin().await?;
 
     let order_row = sqlx::query(
-        "SELECT COALESCE(transaction_type, 'PRODUCT') AS transaction_type, customer_email, item_code, quantity, unit_price, currency FROM orders WHERE id = $1 FOR UPDATE",
+        "SELECT COALESCE(transaction_type, 'PRODUCT') AS transaction_type, customer_email, item_code, quantity, unit_price, currency, status FROM orders WHERE id = $1 FOR UPDATE",
     )
     .bind(order_id)
     .fetch_optional(&mut *tx)
@@ -153,11 +163,35 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
     let currency: String = order_row.try_get("currency")?;
     let customer_email: String = order_row.try_get("customer_email")?;
     let transaction_type_raw: String = order_row.try_get("transaction_type")?;
+    let current_status: String = order_row.try_get("status")?;
     let transaction_type = parse_transaction_type(&transaction_type_raw)?;
 
     if quantity <= Decimal::ZERO || unit_price <= Decimal::ZERO {
         anyhow::bail!("order has invalid quantity or price");
     }
+
+    if current_status == "FULFILLED" {
+        tx.commit().await?;
+        return Ok(OrderFulfilledEvent {
+            order_id,
+            settled_amount: (quantity * unit_price).round_dp(4),
+            currency,
+        });
+    }
+
+    if current_status == "PENDING_APPROVAL" || current_status == "FROZEN" {
+        anyhow::bail!("order is not executable in status {current_status}");
+    }
+    if current_status != "NEW" && current_status != "IN_PROGRESS" {
+        anyhow::bail!("order cannot be processed from status {current_status}");
+    }
+
+    let started_at = Utc::now();
+    sqlx::query("UPDATE orders SET status = 'IN_PROGRESS', updated_at = $2 WHERE id = $1")
+        .bind(order_id)
+        .bind(started_at)
+        .execute(&mut *tx)
+        .await?;
 
     let recalled_memories = recall_memories_for_execution(
         &mut tx,
@@ -195,16 +229,18 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
         return Err(err);
     }
 
+    let mut procurement_ap_amount = Decimal::ZERO;
     let cogs = if transaction_type == TransactionType::Product {
-        let (on_hand, average_cost) =
+        let inventory =
             ensure_inventory_for_order(&mut tx, &item_code, quantity, unit_price, order_id).await?;
 
-        if on_hand < quantity {
+        if inventory.on_hand < quantity {
             anyhow::bail!("inventory still insufficient after procurement");
         }
 
-        let remaining_qty = on_hand - quantity;
-        let product_cogs = (quantity * average_cost).round_dp(4);
+        let remaining_qty = inventory.on_hand - quantity;
+        let product_cogs = (quantity * inventory.avg_cost).round_dp(4);
+        procurement_ap_amount = inventory.procurement_liability;
 
         sqlx::query(
             "UPDATE inventory_positions SET on_hand = $2, updated_at = $3 WHERE item_code = $1",
@@ -227,7 +263,7 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
         .bind(order_id)
         .bind(&item_code)
         .bind(quantity)
-        .bind(average_cost)
+        .bind(inventory.avg_cost)
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;
@@ -238,6 +274,60 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
     };
 
     let revenue = (quantity * unit_price).round_dp(4);
+    let issued_at = Utc::now();
+    let due_at = resolve_invoice_due_at(&mut tx, order_id, issued_at).await?;
+    let invoice_id = create_invoice(
+        &mut tx,
+        order_id,
+        &customer_email,
+        revenue,
+        &currency,
+        issued_at,
+        due_at,
+    )
+    .await?;
+    let mut ar_balance = post_ar_subledger_entry(
+        &mut tx,
+        invoice_id,
+        order_id,
+        "INVOICE_ISSUED",
+        revenue,
+        Decimal::ZERO,
+        Decimal::ZERO,
+        &currency,
+        "Invoice issued",
+        issued_at,
+    )
+    .await?;
+
+    if transaction_type == TransactionType::Product && procurement_ap_amount > Decimal::ZERO {
+        record_ap_obligation_with_entry(
+            &mut tx,
+            order_id,
+            "PROCUREMENT",
+            COUNTERPARTY_PROCUREMENT_AUTO,
+            procurement_ap_amount,
+            &currency,
+            issued_at + Duration::days(AP_DEFAULT_TERMS_DAYS),
+            "Procurement obligation recognized",
+            issued_at,
+        )
+        .await?;
+    }
+    if transaction_type == TransactionType::Service && cogs > Decimal::ZERO {
+        record_ap_obligation_with_entry(
+            &mut tx,
+            order_id,
+            "SERVICE_DELIVERY",
+            COUNTERPARTY_SERVICE_AUTO,
+            cogs,
+            &currency,
+            issued_at + Duration::days(AP_DEFAULT_TERMS_DAYS),
+            "Service delivery obligation recognized",
+            issued_at,
+        )
+        .await?;
+    }
 
     insert_journal(
         &mut tx,
@@ -316,15 +406,30 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
     .bind(order_id)
     .bind(revenue)
     .bind(&currency)
-    .bind(Utc::now())
+    .bind(issued_at)
     .execute(&mut *tx)
     .await?;
+
+    ar_balance = post_ar_subledger_entry(
+        &mut tx,
+        invoice_id,
+        order_id,
+        "PAYMENT_RECEIVED",
+        Decimal::ZERO,
+        revenue,
+        ar_balance,
+        &currency,
+        "Payment received",
+        issued_at,
+    )
+    .await?;
+    update_invoice_status_from_balance(&mut tx, invoice_id, ar_balance, issued_at).await?;
 
     sqlx::query(
         "UPDATE orders SET status = 'FULFILLED', fulfilled_at = $2, updated_at = $2 WHERE id = $1",
     )
     .bind(order_id)
-    .bind(Utc::now())
+    .bind(issued_at)
     .execute(&mut *tx)
     .await?;
 
@@ -354,7 +459,7 @@ async fn ensure_inventory_for_order(
     requested_qty: Decimal,
     unit_price: Decimal,
     order_id: Uuid,
-) -> Result<(Decimal, Decimal)> {
+) -> Result<InventoryExecutionResult> {
     let maybe_row = sqlx::query(
         "SELECT on_hand, avg_cost FROM inventory_positions WHERE item_code = $1 FOR UPDATE",
     )
@@ -378,11 +483,13 @@ async fn ensure_inventory_for_order(
         (Decimal::ZERO, Decimal::ZERO)
     };
 
+    let mut procurement_liability = Decimal::ZERO;
     if on_hand < requested_qty {
         let shortage = requested_qty - on_hand;
         let procurement_unit_cost = (unit_price * Decimal::new(60, 2)).round_dp(4);
         let current_value = on_hand * avg_cost;
         let incoming_value = shortage * procurement_unit_cost;
+        procurement_liability = incoming_value.round_dp(4);
         let new_qty = on_hand + shortage;
         let new_avg = if new_qty.is_zero() {
             Decimal::ZERO
@@ -421,7 +528,11 @@ async fn ensure_inventory_for_order(
         avg_cost = new_avg;
     }
 
-    Ok((on_hand, avg_cost))
+    Ok(InventoryExecutionResult {
+        on_hand,
+        avg_cost,
+        procurement_liability,
+    })
 }
 
 async fn execute_skill_plan(
@@ -884,6 +995,350 @@ fn stable_payload_hash(payload: &Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(serialized);
     format!("{:x}", hasher.finalize())
+}
+
+async fn resolve_invoice_due_at(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    issued_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            qa.accepted_at,
+            q.payment_terms_days
+        FROM quote_acceptances qa
+        INNER JOIN quotes q ON q.id = qa.quote_id
+        WHERE qa.order_id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(order_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(row) = row {
+        let accepted_at: DateTime<Utc> = row.try_get("accepted_at")?;
+        let payment_terms_days: i32 = row.try_get("payment_terms_days")?;
+        let terms = i64::from(payment_terms_days.max(0));
+        return Ok(accepted_at + Duration::days(terms));
+    }
+
+    Ok(issued_at + Duration::days(AP_DEFAULT_TERMS_DAYS))
+}
+
+async fn create_invoice(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    customer_email: &str,
+    amount: Decimal,
+    currency: &str,
+    issued_at: DateTime<Utc>,
+    due_at: DateTime<Utc>,
+) -> Result<Uuid> {
+    let invoice_id = Uuid::new_v4();
+    let invoice_number = format!("INV-{order_id}");
+    let row = sqlx::query(
+        r#"
+        INSERT INTO invoices (
+            id,
+            order_id,
+            invoice_number,
+            customer_email,
+            amount,
+            currency,
+            status,
+            issued_at,
+            due_at,
+            created_by_agent_id,
+            created_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'ISSUED', $7, $8, $9, $7, $7)
+        ON CONFLICT (order_id)
+        DO UPDATE SET
+            invoice_number = EXCLUDED.invoice_number,
+            customer_email = EXCLUDED.customer_email,
+            amount = EXCLUDED.amount,
+            currency = EXCLUDED.currency,
+            due_at = EXCLUDED.due_at,
+            updated_at = EXCLUDED.updated_at
+        RETURNING id
+        "#,
+    )
+    .bind(invoice_id)
+    .bind(order_id)
+    .bind(invoice_number)
+    .bind(customer_email)
+    .bind(amount)
+    .bind(currency)
+    .bind(issued_at)
+    .bind(due_at)
+    .bind(OPS_AGENT_ID)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(row.try_get("id")?)
+}
+
+async fn post_ar_subledger_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    invoice_id: Uuid,
+    order_id: Uuid,
+    entry_type: &str,
+    debit: Decimal,
+    credit: Decimal,
+    prior_balance: Decimal,
+    currency: &str,
+    memo: &str,
+    posted_at: DateTime<Utc>,
+) -> Result<Decimal> {
+    let existing = sqlx::query(
+        r#"
+        SELECT balance_after
+        FROM ar_subledger_entries
+        WHERE invoice_id = $1
+          AND entry_type = $2
+        ORDER BY posted_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(invoice_id)
+    .bind(entry_type)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(row) = existing {
+        let balance_after: Decimal = row.try_get("balance_after")?;
+        return Ok(balance_after.round_dp(4));
+    }
+
+    let balance_after = (prior_balance + debit - credit).round_dp(4);
+    sqlx::query(
+        r#"
+        INSERT INTO ar_subledger_entries (
+            id,
+            invoice_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(invoice_id)
+    .bind(order_id)
+    .bind(entry_type)
+    .bind(debit.round_dp(4))
+    .bind(credit.round_dp(4))
+    .bind(balance_after)
+    .bind(currency)
+    .bind(memo)
+    .bind(OPS_AGENT_ID)
+    .bind(posted_at)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(balance_after)
+}
+
+async fn update_invoice_status_from_balance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    invoice_id: Uuid,
+    balance: Decimal,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let amount: Decimal = sqlx::query_scalar("SELECT amount FROM invoices WHERE id = $1")
+        .bind(invoice_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
+    let (status, settled_at) = if balance <= Decimal::new(1, 2) {
+        ("PAID", Some(updated_at))
+    } else if balance < amount {
+        ("PARTIALLY_PAID", None)
+    } else {
+        ("ISSUED", None)
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE invoices
+        SET status = $2, settled_at = $3, updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(invoice_id)
+    .bind(status)
+    .bind(settled_at)
+    .bind(updated_at)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn record_ap_obligation_with_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    source_type: &str,
+    counterparty: &str,
+    amount: Decimal,
+    currency: &str,
+    due_at: DateTime<Utc>,
+    memo: &str,
+    posted_at: DateTime<Utc>,
+) -> Result<Uuid> {
+    let existing = sqlx::query(
+        r#"
+        SELECT id
+        FROM ap_obligations
+        WHERE order_id = $1
+          AND source_type = $2
+          AND status = 'OPEN'
+        LIMIT 1
+        "#,
+    )
+    .bind(order_id)
+    .bind(source_type)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let obligation_id: Uuid = if let Some(row) = existing {
+        row.try_get("id")?
+    } else {
+        let obligation_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO ap_obligations (
+                id,
+                order_id,
+                source_type,
+                counterparty,
+                amount,
+                currency,
+                status,
+                due_at,
+                created_by_agent_id,
+                created_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $9)
+            "#,
+        )
+        .bind(obligation_id)
+        .bind(order_id)
+        .bind(source_type)
+        .bind(counterparty)
+        .bind(amount.round_dp(4))
+        .bind(currency)
+        .bind(due_at)
+        .bind(OPS_AGENT_ID)
+        .bind(posted_at)
+        .execute(&mut **tx)
+        .await?;
+        obligation_id
+    };
+
+    post_ap_subledger_entry(
+        tx,
+        obligation_id,
+        order_id,
+        "OBLIGATION_RECOGNIZED",
+        Decimal::ZERO,
+        amount.round_dp(4),
+        currency,
+        memo,
+        posted_at,
+    )
+    .await?;
+
+    Ok(obligation_id)
+}
+
+async fn post_ap_subledger_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ap_obligation_id: Uuid,
+    order_id: Uuid,
+    entry_type: &str,
+    debit: Decimal,
+    credit: Decimal,
+    currency: &str,
+    memo: &str,
+    posted_at: DateTime<Utc>,
+) -> Result<Decimal> {
+    let existing = sqlx::query(
+        r#"
+        SELECT balance_after
+        FROM ap_subledger_entries
+        WHERE ap_obligation_id = $1
+          AND entry_type = $2
+        ORDER BY posted_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(ap_obligation_id)
+    .bind(entry_type)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(row) = existing {
+        let balance_after: Decimal = row.try_get("balance_after")?;
+        return Ok(balance_after.round_dp(4));
+    }
+
+    let prior_balance = sqlx::query_scalar::<_, Decimal>(
+        r#"
+        SELECT COALESCE(MAX(balance_after), 0)
+        FROM ap_subledger_entries
+        WHERE ap_obligation_id = $1
+        "#,
+    )
+    .bind(ap_obligation_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let balance_after = (prior_balance + credit - debit).round_dp(4);
+
+    sqlx::query(
+        r#"
+        INSERT INTO ap_subledger_entries (
+            id,
+            ap_obligation_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(ap_obligation_id)
+    .bind(order_id)
+    .bind(entry_type)
+    .bind(debit.round_dp(4))
+    .bind(credit.round_dp(4))
+    .bind(balance_after)
+    .bind(currency)
+    .bind(memo)
+    .bind(OPS_AGENT_ID)
+    .bind(posted_at)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(balance_after)
 }
 
 async fn insert_journal(

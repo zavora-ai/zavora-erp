@@ -340,6 +340,86 @@ CREATE TABLE IF NOT EXISTS settlements (
 
 CREATE INDEX IF NOT EXISTS idx_settlements_order_id ON settlements(order_id);
 
+CREATE TABLE IF NOT EXISTS invoices (
+    id UUID PRIMARY KEY,
+    order_id UUID NOT NULL UNIQUE REFERENCES orders(id),
+    invoice_number TEXT NOT NULL UNIQUE,
+    customer_email TEXT NOT NULL,
+    amount NUMERIC(20, 4) NOT NULL CHECK (amount > 0),
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ISSUED', 'PARTIALLY_PAID', 'PAID', 'VOID')),
+    issued_at TIMESTAMPTZ NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
+    settled_at TIMESTAMPTZ,
+    created_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (due_at >= issued_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoices_status_due_at
+    ON invoices(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_invoices_issued_at
+    ON invoices(issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS ar_subledger_entries (
+    id UUID PRIMARY KEY,
+    invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    entry_type TEXT NOT NULL CHECK (entry_type IN ('INVOICE_ISSUED', 'PAYMENT_RECEIVED', 'ADJUSTMENT')),
+    debit NUMERIC(20, 4) NOT NULL CHECK (debit >= 0),
+    credit NUMERIC(20, 4) NOT NULL CHECK (credit >= 0),
+    balance_after NUMERIC(20, 4) NOT NULL,
+    currency TEXT NOT NULL,
+    memo TEXT NOT NULL,
+    posted_by_agent_id TEXT NOT NULL,
+    posted_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ar_subledger_invoice_posted_at
+    ON ar_subledger_entries(invoice_id, posted_at);
+CREATE INDEX IF NOT EXISTS idx_ar_subledger_order_posted_at
+    ON ar_subledger_entries(order_id, posted_at);
+
+CREATE TABLE IF NOT EXISTS ap_obligations (
+    id UUID PRIMARY KEY,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('PROCUREMENT', 'SERVICE_DELIVERY', 'AUTONOMY_PAYROLL')),
+    counterparty TEXT NOT NULL,
+    amount NUMERIC(20, 4) NOT NULL CHECK (amount > 0),
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'SETTLED', 'CANCELLED')),
+    due_at TIMESTAMPTZ NOT NULL,
+    settled_at TIMESTAMPTZ,
+    created_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ap_obligations_status_due_at
+    ON ap_obligations(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_ap_obligations_order_id
+    ON ap_obligations(order_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ap_subledger_entries (
+    id UUID PRIMARY KEY,
+    ap_obligation_id UUID NOT NULL REFERENCES ap_obligations(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    entry_type TEXT NOT NULL CHECK (entry_type IN ('OBLIGATION_RECOGNIZED', 'PAYMENT_POSTED', 'ADJUSTMENT')),
+    debit NUMERIC(20, 4) NOT NULL CHECK (debit >= 0),
+    credit NUMERIC(20, 4) NOT NULL CHECK (credit >= 0),
+    balance_after NUMERIC(20, 4) NOT NULL,
+    currency TEXT NOT NULL,
+    memo TEXT NOT NULL,
+    posted_by_agent_id TEXT NOT NULL,
+    posted_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ap_subledger_obligation_posted_at
+    ON ap_subledger_entries(ap_obligation_id, posted_at);
+CREATE INDEX IF NOT EXISTS idx_ap_subledger_order_posted_at
+    ON ap_subledger_entries(order_id, posted_at);
+
 CREATE TABLE IF NOT EXISTS agent_semantic_memory (
     id UUID PRIMARY KEY,
     agent_name TEXT NOT NULL,
