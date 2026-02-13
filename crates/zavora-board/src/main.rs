@@ -31,6 +31,7 @@ struct OrderEvidencePackage {
     inventory_movements: Vec<AuditInventoryMovementRecord>,
     journals: Vec<AuditJournalRecord>,
     settlements: Vec<AuditSettlementRecord>,
+    payroll_allocations: Vec<AuditPayrollAllocationRecord>,
     memories: Vec<AuditMemoryRecord>,
     timeline: Vec<AuditTimelineEvent>,
     totals: AuditTotals,
@@ -153,6 +154,21 @@ struct AuditSettlementRecord {
 }
 
 #[derive(Debug, Serialize)]
+struct AuditPayrollAllocationRecord {
+    id: Uuid,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    source_type: String,
+    source_id: Uuid,
+    agent_id: Option<String>,
+    skill_id: Option<String>,
+    allocation_basis: String,
+    allocated_cost: Decimal,
+    currency: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
 struct AuditMemoryRecord {
     id: Uuid,
     agent_name: String,
@@ -180,6 +196,8 @@ struct AuditTotals {
     journal_credit_total: Decimal,
     cogs_total: Decimal,
     settlement_total: Decimal,
+    autonomy_cost_total: Decimal,
+    margin_after_autonomy_cost: Decimal,
 }
 
 #[tokio::main]
@@ -244,6 +262,20 @@ async fn board_pack(
     .await
     .map_err(internal_error)?;
 
+    let autonomy_cost_row = sqlx::query(
+        "SELECT COALESCE(SUM(allocated_cost), 0) AS autonomy_operating_cost FROM finops_cost_allocations",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let cogs_row = sqlx::query(
+        "SELECT COALESCE(SUM(debit), 0) AS cogs_total FROM journals WHERE account = '5000'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
     let pipeline = sqlx::query(
         r#"
         SELECT
@@ -257,6 +289,49 @@ async fn board_pack(
     .fetch_one(&state.pool)
     .await
     .map_err(internal_error)?;
+
+    let latest_reconciliation = sqlx::query(
+        r#"
+        SELECT status, variance_pct, completed_at
+        FROM finops_period_reconciliations
+        ORDER BY completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let revenue = totals
+        .try_get::<Decimal, _>("revenue")
+        .map_err(internal_error)?;
+    let autonomy_operating_cost = autonomy_cost_row
+        .try_get::<Decimal, _>("autonomy_operating_cost")
+        .map_err(internal_error)?;
+    let cogs_total = cogs_row
+        .try_get::<Decimal, _>("cogs_total")
+        .map_err(internal_error)?;
+    let margin_after_autonomy_cost = (revenue - cogs_total - autonomy_operating_cost).round_dp(4);
+    let revenue_to_agent_payroll_ratio = if autonomy_operating_cost > Decimal::ZERO {
+        (revenue / autonomy_operating_cost).round_dp(4)
+    } else {
+        Decimal::ZERO
+    };
+    let (
+        finops_reconciliation_status,
+        finops_reconciliation_variance_pct,
+        finops_last_reconciled_at,
+    ) = if let Some(row) = latest_reconciliation {
+        (
+            row.try_get::<String, _>("status").map_err(internal_error)?,
+            row.try_get::<Decimal, _>("variance_pct")
+                .map_err(internal_error)?,
+            row.try_get::<Option<DateTime<Utc>>, _>("completed_at")
+                .map_err(internal_error)?,
+        )
+    } else {
+        ("NOT_RUN".to_string(), Decimal::ZERO, None)
+    };
 
     let pack = BoardPack {
         generated_at: Utc::now(),
@@ -287,15 +362,19 @@ async fn board_pack(
         governance_escalations_pending: pipeline
             .try_get::<i64, _>("governance_escalations_pending")
             .map_err(internal_error)?,
-        revenue: totals
-            .try_get::<Decimal, _>("revenue")
-            .map_err(internal_error)?,
+        revenue,
         cash_collected: settlements
             .try_get::<Decimal, _>("cash_collected")
             .map_err(internal_error)?,
         inventory_value: inventory
             .try_get::<Decimal, _>("inventory_value")
             .map_err(internal_error)?,
+        autonomy_operating_cost,
+        margin_after_autonomy_cost,
+        revenue_to_agent_payroll_ratio,
+        finops_reconciliation_status,
+        finops_reconciliation_variance_pct,
+        finops_last_reconciled_at,
     };
 
     Ok(Json(pack))
@@ -643,6 +722,47 @@ async fn order_evidence(
         });
     }
 
+    let payroll_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            period_start,
+            period_end,
+            source_type,
+            source_id,
+            agent_id,
+            skill_id,
+            allocation_basis,
+            allocated_cost,
+            currency,
+            created_at
+        FROM finops_cost_allocations
+        WHERE order_id = $1
+        ORDER BY created_at
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut payroll_allocations = Vec::with_capacity(payroll_rows.len());
+    for row in payroll_rows {
+        payroll_allocations.push(AuditPayrollAllocationRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            period_start: row.try_get("period_start").map_err(internal_error)?,
+            period_end: row.try_get("period_end").map_err(internal_error)?,
+            source_type: row.try_get("source_type").map_err(internal_error)?,
+            source_id: row.try_get("source_id").map_err(internal_error)?,
+            agent_id: row.try_get("agent_id").map_err(internal_error)?,
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+            allocation_basis: row.try_get("allocation_basis").map_err(internal_error)?,
+            allocated_cost: row.try_get("allocated_cost").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+        });
+    }
+
     let memory_rows = sqlx::query(
         r#"
         SELECT
@@ -759,6 +879,21 @@ async fn order_evidence(
         });
     }
 
+    for allocation in &payroll_allocations {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: allocation.created_at,
+            event_type: "PAYROLL_COST_ALLOCATED".to_string(),
+            source: "finops_cost_allocations".to_string(),
+            details: format!(
+                "source_type={} basis={} allocated_cost={} {}",
+                allocation.source_type,
+                allocation.allocation_basis,
+                allocation.allocated_cost,
+                allocation.currency
+            ),
+        });
+    }
+
     for settlement in &settlements {
         timeline.push(AuditTimelineEvent {
             occurred_at: settlement.received_at,
@@ -823,6 +958,12 @@ async fn order_evidence(
         .iter()
         .fold(Decimal::ZERO, |acc, line| acc + line.amount)
         .round_dp(4);
+    let autonomy_cost_total = payroll_allocations
+        .iter()
+        .fold(Decimal::ZERO, |acc, line| acc + line.allocated_cost)
+        .round_dp(4);
+    let margin_after_autonomy_cost =
+        (line_value_total - cogs_total - autonomy_cost_total).round_dp(4);
 
     let package = OrderEvidencePackage {
         generated_at: Utc::now(),
@@ -835,6 +976,7 @@ async fn order_evidence(
         inventory_movements,
         journals,
         settlements,
+        payroll_allocations,
         memories,
         timeline,
         totals: AuditTotals {
@@ -843,6 +985,8 @@ async fn order_evidence(
             journal_credit_total,
             cogs_total,
             settlement_total,
+            autonomy_cost_total,
+            margin_after_autonomy_cost,
         },
     };
 

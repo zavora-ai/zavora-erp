@@ -246,3 +246,106 @@ VALUES
     ('ORDER_EXECUTION_PRODUCT', FALSE, NULL, 'board-agent', NOW()),
     ('ORDER_EXECUTION_SERVICE', FALSE, NULL, 'board-agent', NOW())
 ON CONFLICT (action_type) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS finops_token_usage (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id),
+    agent_id TEXT NOT NULL,
+    skill_id TEXT,
+    action_name TEXT NOT NULL,
+    input_tokens BIGINT NOT NULL CHECK (input_tokens >= 0),
+    output_tokens BIGINT NOT NULL CHECK (output_tokens >= 0),
+    total_tokens BIGINT NOT NULL CHECK (total_tokens >= 0),
+    token_unit_cost NUMERIC(20, 8) NOT NULL CHECK (token_unit_cost >= 0),
+    total_cost NUMERIC(20, 4) NOT NULL CHECK (total_cost >= 0),
+    currency TEXT NOT NULL,
+    source_ref TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    ingested_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_finops_token_usage_occurred_at
+    ON finops_token_usage(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_finops_token_usage_order_id
+    ON finops_token_usage(order_id);
+CREATE INDEX IF NOT EXISTS idx_finops_token_usage_agent_id
+    ON finops_token_usage(agent_id);
+
+CREATE TABLE IF NOT EXISTS finops_cloud_costs (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id),
+    provider TEXT NOT NULL,
+    cost_type TEXT NOT NULL CHECK (cost_type IN ('COMPUTE', 'STORAGE', 'NETWORK')),
+    usage_quantity NUMERIC(20, 6) NOT NULL CHECK (usage_quantity >= 0),
+    unit_cost NUMERIC(20, 6) NOT NULL CHECK (unit_cost >= 0),
+    total_cost NUMERIC(20, 4) NOT NULL CHECK (total_cost >= 0),
+    currency TEXT NOT NULL,
+    source_ref TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    ingested_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_finops_cloud_costs_occurred_at
+    ON finops_cloud_costs(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_finops_cloud_costs_order_id
+    ON finops_cloud_costs(order_id);
+
+CREATE TABLE IF NOT EXISTS finops_subscription_costs (
+    id UUID PRIMARY KEY,
+    tool_name TEXT NOT NULL,
+    subscription_name TEXT NOT NULL,
+    period_start TIMESTAMPTZ NOT NULL,
+    period_end TIMESTAMPTZ NOT NULL,
+    total_cost NUMERIC(20, 4) NOT NULL CHECK (total_cost >= 0),
+    currency TEXT NOT NULL,
+    source_ref TEXT,
+    ingested_by_agent_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    CHECK (period_end > period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_finops_subscription_costs_period
+    ON finops_subscription_costs(period_start, period_end);
+
+CREATE TABLE IF NOT EXISTS finops_cost_allocations (
+    id UUID PRIMARY KEY,
+    period_start TIMESTAMPTZ NOT NULL,
+    period_end TIMESTAMPTZ NOT NULL,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('TOKEN', 'CLOUD', 'SUBSCRIPTION')),
+    source_id UUID NOT NULL,
+    agent_id TEXT,
+    skill_id TEXT,
+    allocation_basis TEXT NOT NULL CHECK (allocation_basis IN ('DIRECT_ORDER', 'REVENUE_SHARE')),
+    allocated_cost NUMERIC(20, 4) NOT NULL CHECK (allocated_cost >= 0),
+    currency TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finops_cost_allocations_uniqueness
+    ON finops_cost_allocations(period_start, period_end, source_type, source_id, order_id);
+CREATE INDEX IF NOT EXISTS idx_finops_cost_allocations_period
+    ON finops_cost_allocations(period_start, period_end);
+CREATE INDEX IF NOT EXISTS idx_finops_cost_allocations_order_id
+    ON finops_cost_allocations(order_id);
+
+CREATE TABLE IF NOT EXISTS finops_period_reconciliations (
+    period_start TIMESTAMPTZ NOT NULL,
+    period_end TIMESTAMPTZ NOT NULL,
+    source_total NUMERIC(20, 4) NOT NULL CHECK (source_total >= 0),
+    allocated_total NUMERIC(20, 4) NOT NULL CHECK (allocated_total >= 0),
+    journal_total NUMERIC(20, 4) NOT NULL CHECK (journal_total >= 0),
+    variance_amount NUMERIC(20, 4) NOT NULL CHECK (variance_amount >= 0),
+    variance_pct NUMERIC(20, 4) NOT NULL CHECK (variance_pct >= 0),
+    orders_allocated BIGINT NOT NULL CHECK (orders_allocated >= 0),
+    status TEXT NOT NULL CHECK (status IN ('BALANCED', 'OUT_OF_TOLERANCE', 'NO_SOURCE_COSTS')),
+    completed_by_agent_id TEXT NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (period_start, period_end),
+    CHECK (period_end > period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_finops_period_reconciliations_completed_at
+    ON finops_period_reconciliations(completed_at DESC);

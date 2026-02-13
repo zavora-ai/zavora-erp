@@ -131,6 +131,12 @@ pub struct BoardPack {
     pub revenue: Decimal,
     pub cash_collected: Decimal,
     pub inventory_value: Decimal,
+    pub autonomy_operating_cost: Decimal,
+    pub margin_after_autonomy_cost: Decimal,
+    pub revenue_to_agent_payroll_ratio: Decimal,
+    pub finops_reconciliation_status: String,
+    pub finops_reconciliation_variance_pct: Decimal,
+    pub finops_last_reconciled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

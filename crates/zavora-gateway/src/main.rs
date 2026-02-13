@@ -1,4 +1,7 @@
-use std::net::SocketAddr;
+use std::{
+    cmp::{max, min},
+    net::SocketAddr,
+};
 
 use anyhow::Result as AnyResult;
 use axum::{
@@ -35,8 +38,11 @@ const REGISTERED_AGENT_IDS: [&str; 10] = [
 ];
 
 const GOVERNANCE_ACTOR_IDS: [&str; 3] = ["board-agent", "strategy-agent", "controller-agent"];
+const FINOPS_ACTOR_IDS: [&str; 3] = ["payroll-agent", "controller-agent", "board-agent"];
 const ACTION_ORDER_EXECUTION_PRODUCT: &str = "ORDER_EXECUTION_PRODUCT";
 const ACTION_ORDER_EXECUTION_SERVICE: &str = "ORDER_EXECUTION_SERVICE";
+const PAYROLL_EXPENSE_ACCOUNT: &str = "5100";
+const PAYROLL_CLEARING_ACCOUNT: &str = "2200";
 
 #[derive(Clone)]
 struct AppState {
@@ -120,6 +126,115 @@ struct DecideEscalationResponse {
     dispatched: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestTokenUsageRequest {
+    order_id: Option<Uuid>,
+    agent_id: String,
+    skill_id: Option<String>,
+    action_name: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    token_unit_cost: Decimal,
+    total_cost: Option<Decimal>,
+    currency: String,
+    occurred_at: Option<DateTime<Utc>>,
+    source_ref: Option<String>,
+    ingested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestTokenUsageResponse {
+    usage_id: Uuid,
+    total_tokens: i64,
+    total_cost: Decimal,
+    currency: String,
+    occurred_at: DateTime<Utc>,
+    stored_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestCloudCostRequest {
+    order_id: Option<Uuid>,
+    provider: String,
+    cost_type: String,
+    usage_quantity: Decimal,
+    unit_cost: Decimal,
+    total_cost: Option<Decimal>,
+    currency: String,
+    occurred_at: Option<DateTime<Utc>>,
+    source_ref: Option<String>,
+    ingested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestCloudCostResponse {
+    cloud_cost_id: Uuid,
+    total_cost: Decimal,
+    currency: String,
+    occurred_at: DateTime<Utc>,
+    stored_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestSubscriptionCostRequest {
+    tool_name: String,
+    subscription_name: String,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    total_cost: Decimal,
+    currency: String,
+    source_ref: Option<String>,
+    ingested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngestSubscriptionCostResponse {
+    subscription_cost_id: Uuid,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    total_cost: Decimal,
+    currency: String,
+    stored_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AllocateCostsRequest {
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    requested_by_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AllocateCostsResponse {
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    orders_allocated: i64,
+    source_total: Decimal,
+    allocated_total: Decimal,
+    journal_total: Decimal,
+    variance_amount: Decimal,
+    variance_pct: Decimal,
+    status: String,
+    completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct FulfilledOrder {
+    order_id: Uuid,
+    revenue: Decimal,
+}
+
+#[derive(Debug, Clone)]
+struct AllocationInput {
+    source_type: &'static str,
+    source_id: Uuid,
+    order_id: Option<Uuid>,
+    amount: Decimal,
+    currency: String,
+    agent_id: Option<String>,
+    skill_id: Option<String>,
+}
+
 struct PolicyGateResult {
     is_frozen: bool,
     freeze_reason: Option<String>,
@@ -150,6 +265,10 @@ async fn main() -> AnyResult<()> {
         .route("/governance/thresholds", post(set_threshold))
         .route("/governance/freeze", post(set_freeze))
         .route("/governance/escalations", get(list_escalations))
+        .route("/finops/token-usage", post(ingest_token_usage))
+        .route("/finops/cloud-costs", post(ingest_cloud_cost))
+        .route("/finops/subscriptions", post(ingest_subscription_cost))
+        .route("/finops/allocate", post(allocate_costs))
         .route(
             "/governance/escalations/{escalation_id}/decide",
             post(decide_escalation),
@@ -1090,6 +1209,732 @@ async fn decide_escalation(
     }))
 }
 
+async fn ingest_token_usage(
+    State(state): State<AppState>,
+    Json(payload): Json<IngestTokenUsageRequest>,
+) -> Result<(StatusCode, Json<IngestTokenUsageResponse>), (StatusCode, String)> {
+    let ingested_by_agent_id = validate_finops_actor(&payload.ingested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let agent_id = validate_agent_id(&payload.agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if payload.action_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "action_name is required".to_string(),
+        ));
+    }
+    if payload.input_tokens < 0 || payload.output_tokens < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "token counters must be non-negative".to_string(),
+        ));
+    }
+    if payload.token_unit_cost < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "token_unit_cost must be non-negative".to_string(),
+        ));
+    }
+
+    if let Some(order_id) = payload.order_id {
+        ensure_order_exists(&state.pool, order_id).await?;
+    }
+
+    let total_tokens = payload.input_tokens + payload.output_tokens;
+    if total_tokens < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "total_tokens overflowed".to_string(),
+        ));
+    }
+
+    let computed_total_cost = (Decimal::from(total_tokens) * payload.token_unit_cost).round_dp(4);
+    let total_cost = payload
+        .total_cost
+        .unwrap_or(computed_total_cost)
+        .round_dp(4);
+    if total_cost < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "total_cost must be non-negative".to_string(),
+        ));
+    }
+
+    let occurred_at = payload.occurred_at.unwrap_or_else(Utc::now);
+    let stored_at = Utc::now();
+    let usage_id = Uuid::new_v4();
+    let currency = normalize_currency(&payload.currency).map_err(invalid_request)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO finops_token_usage (
+            id, order_id, agent_id, skill_id, action_name, input_tokens, output_tokens,
+            total_tokens, token_unit_cost, total_cost, currency, source_ref, occurred_at,
+            ingested_by_agent_id, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        "#,
+    )
+    .bind(usage_id)
+    .bind(payload.order_id)
+    .bind(agent_id)
+    .bind(payload.skill_id.as_deref().map(str::trim))
+    .bind(payload.action_name.trim())
+    .bind(payload.input_tokens)
+    .bind(payload.output_tokens)
+    .bind(total_tokens)
+    .bind(payload.token_unit_cost)
+    .bind(total_cost)
+    .bind(&currency)
+    .bind(payload.source_ref.as_deref().map(str::trim))
+    .bind(occurred_at)
+    .bind(&ingested_by_agent_id)
+    .bind(stored_at)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(IngestTokenUsageResponse {
+            usage_id,
+            total_tokens,
+            total_cost,
+            currency,
+            occurred_at,
+            stored_at,
+        }),
+    ))
+}
+
+async fn ingest_cloud_cost(
+    State(state): State<AppState>,
+    Json(payload): Json<IngestCloudCostRequest>,
+) -> Result<(StatusCode, Json<IngestCloudCostResponse>), (StatusCode, String)> {
+    let ingested_by_agent_id = validate_finops_actor(&payload.ingested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if let Some(order_id) = payload.order_id {
+        ensure_order_exists(&state.pool, order_id).await?;
+    }
+    if payload.provider.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "provider is required".to_string()));
+    }
+    if payload.usage_quantity < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "usage_quantity must be non-negative".to_string(),
+        ));
+    }
+    if payload.unit_cost < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "unit_cost must be non-negative".to_string(),
+        ));
+    }
+
+    let cost_type = normalize_cloud_cost_type(&payload.cost_type).map_err(invalid_request)?;
+    let currency = normalize_currency(&payload.currency).map_err(invalid_request)?;
+    let occurred_at = payload.occurred_at.unwrap_or_else(Utc::now);
+    let stored_at = Utc::now();
+    let cloud_cost_id = Uuid::new_v4();
+    let computed_total_cost = (payload.usage_quantity * payload.unit_cost).round_dp(4);
+    let total_cost = payload
+        .total_cost
+        .unwrap_or(computed_total_cost)
+        .round_dp(4);
+    if total_cost < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "total_cost must be non-negative".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO finops_cloud_costs (
+            id, order_id, provider, cost_type, usage_quantity, unit_cost, total_cost,
+            currency, source_ref, occurred_at, ingested_by_agent_id, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        "#,
+    )
+    .bind(cloud_cost_id)
+    .bind(payload.order_id)
+    .bind(payload.provider.trim())
+    .bind(cost_type)
+    .bind(payload.usage_quantity)
+    .bind(payload.unit_cost)
+    .bind(total_cost)
+    .bind(&currency)
+    .bind(payload.source_ref.as_deref().map(str::trim))
+    .bind(occurred_at)
+    .bind(&ingested_by_agent_id)
+    .bind(stored_at)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(IngestCloudCostResponse {
+            cloud_cost_id,
+            total_cost,
+            currency,
+            occurred_at,
+            stored_at,
+        }),
+    ))
+}
+
+async fn ingest_subscription_cost(
+    State(state): State<AppState>,
+    Json(payload): Json<IngestSubscriptionCostRequest>,
+) -> Result<(StatusCode, Json<IngestSubscriptionCostResponse>), (StatusCode, String)> {
+    let ingested_by_agent_id = validate_finops_actor(&payload.ingested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if payload.tool_name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tool_name is required".to_string()));
+    }
+    if payload.subscription_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "subscription_name is required".to_string(),
+        ));
+    }
+    if payload.total_cost < Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "total_cost must be non-negative".to_string(),
+        ));
+    }
+    if payload.period_end <= payload.period_start {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "period_end must be greater than period_start".to_string(),
+        ));
+    }
+
+    let currency = normalize_currency(&payload.currency).map_err(invalid_request)?;
+    let stored_at = Utc::now();
+    let subscription_cost_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO finops_subscription_costs (
+            id, tool_name, subscription_name, period_start, period_end, total_cost,
+            currency, source_ref, ingested_by_agent_id, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(subscription_cost_id)
+    .bind(payload.tool_name.trim())
+    .bind(payload.subscription_name.trim())
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .bind(payload.total_cost.round_dp(4))
+    .bind(&currency)
+    .bind(payload.source_ref.as_deref().map(str::trim))
+    .bind(&ingested_by_agent_id)
+    .bind(stored_at)
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(IngestSubscriptionCostResponse {
+            subscription_cost_id,
+            period_start: payload.period_start,
+            period_end: payload.period_end,
+            total_cost: payload.total_cost.round_dp(4),
+            currency,
+            stored_at,
+        }),
+    ))
+}
+
+async fn allocate_costs(
+    State(state): State<AppState>,
+    Json(payload): Json<AllocateCostsRequest>,
+) -> Result<Json<AllocateCostsResponse>, (StatusCode, String)> {
+    let requested_by_agent_id = validate_finops_actor(&payload.requested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    if payload.period_end <= payload.period_start {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "period_end must be greater than period_start".to_string(),
+        ));
+    }
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+    let orders = list_fulfilled_orders(&mut tx, payload.period_start, payload.period_end)
+        .await
+        .map_err(internal_error)?;
+    if orders.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no fulfilled orders found in the requested period".to_string(),
+        ));
+    }
+
+    let period_start = payload.period_start;
+    let period_end = payload.period_end;
+    let period_key = format!("{}|{}", period_start.to_rfc3339(), period_end.to_rfc3339());
+    let order_ids: Vec<Uuid> = orders.iter().map(|order| order.order_id).collect();
+    let delete_memo_pattern = format!("PAYROLL_ALLOC|{period_key}|%");
+
+    sqlx::query(
+        r#"
+        DELETE FROM journals
+        WHERE order_id = ANY($1)
+          AND memo LIKE $2
+        "#,
+    )
+    .bind(&order_ids)
+    .bind(&delete_memo_pattern)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query("DELETE FROM finops_cost_allocations WHERE period_start = $1 AND period_end = $2")
+        .bind(period_start)
+        .bind(period_end)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+    let mut source_total = Decimal::ZERO;
+    let mut allocated_total = Decimal::ZERO;
+
+    let token_rows = sqlx::query(
+        r#"
+        SELECT id, order_id, agent_id, skill_id, total_cost, currency
+        FROM finops_token_usage
+        WHERE occurred_at >= $1
+          AND occurred_at < $2
+        ORDER BY occurred_at, id
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    for row in token_rows {
+        let amount: Decimal = row.try_get("total_cost").map_err(internal_error)?;
+        let input = AllocationInput {
+            source_type: "TOKEN",
+            source_id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            amount: amount.round_dp(4),
+            currency: row.try_get("currency").map_err(internal_error)?,
+            agent_id: row.try_get("agent_id").map_err(internal_error)?,
+            skill_id: row.try_get("skill_id").map_err(internal_error)?,
+        };
+        source_total += input.amount;
+        allocated_total += allocate_input_cost(&mut tx, &orders, period_start, period_end, &input)
+            .await
+            .map_err(internal_error)?;
+    }
+
+    let cloud_rows = sqlx::query(
+        r#"
+        SELECT id, order_id, total_cost, currency
+        FROM finops_cloud_costs
+        WHERE occurred_at >= $1
+          AND occurred_at < $2
+        ORDER BY occurred_at, id
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    for row in cloud_rows {
+        let amount: Decimal = row.try_get("total_cost").map_err(internal_error)?;
+        let input = AllocationInput {
+            source_type: "CLOUD",
+            source_id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            amount: amount.round_dp(4),
+            currency: row.try_get("currency").map_err(internal_error)?,
+            agent_id: None,
+            skill_id: None,
+        };
+        source_total += input.amount;
+        allocated_total += allocate_input_cost(&mut tx, &orders, period_start, period_end, &input)
+            .await
+            .map_err(internal_error)?;
+    }
+
+    let subscription_rows = sqlx::query(
+        r#"
+        SELECT id, period_start, period_end, total_cost, currency
+        FROM finops_subscription_costs
+        WHERE period_start < $2
+          AND period_end > $1
+        ORDER BY period_start, id
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    for row in subscription_rows {
+        let src_period_start: DateTime<Utc> =
+            row.try_get("period_start").map_err(internal_error)?;
+        let src_period_end: DateTime<Utc> = row.try_get("period_end").map_err(internal_error)?;
+        let src_total_cost: Decimal = row.try_get("total_cost").map_err(internal_error)?;
+        let seconds_total = (src_period_end - src_period_start).num_seconds();
+        if seconds_total <= 0 {
+            continue;
+        }
+
+        let overlap_start = max(src_period_start, period_start);
+        let overlap_end = min(src_period_end, period_end);
+        let overlap_seconds = (overlap_end - overlap_start).num_seconds();
+        if overlap_seconds <= 0 {
+            continue;
+        }
+
+        let overlap_ratio =
+            (Decimal::from(overlap_seconds) / Decimal::from(seconds_total)).round_dp(8);
+        let prorated_cost = (src_total_cost * overlap_ratio).round_dp(4);
+
+        let input = AllocationInput {
+            source_type: "SUBSCRIPTION",
+            source_id: row.try_get("id").map_err(internal_error)?,
+            order_id: None,
+            amount: prorated_cost,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            agent_id: None,
+            skill_id: None,
+        };
+        source_total += input.amount;
+        allocated_total += allocate_input_cost(&mut tx, &orders, period_start, period_end, &input)
+            .await
+            .map_err(internal_error)?;
+    }
+
+    let per_order_rows = sqlx::query(
+        r#"
+        SELECT order_id, currency, COALESCE(SUM(allocated_cost), 0) AS total_cost
+        FROM finops_cost_allocations
+        WHERE period_start = $1
+          AND period_end = $2
+        GROUP BY order_id, currency
+        ORDER BY order_id
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let completed_at = Utc::now();
+    let mut journal_total = Decimal::ZERO;
+    for row in per_order_rows {
+        let order_id: Uuid = row.try_get("order_id").map_err(internal_error)?;
+        let currency: String = row.try_get("currency").map_err(internal_error)?;
+        let cost: Decimal = row.try_get("total_cost").map_err(internal_error)?;
+        let rounded_cost = cost.round_dp(4);
+        if rounded_cost <= Decimal::ZERO {
+            continue;
+        }
+
+        let memo_prefix = format!(
+            "PAYROLL_ALLOC|{}|{}|{}",
+            period_start.to_rfc3339(),
+            period_end.to_rfc3339(),
+            order_id
+        );
+        insert_journal_line(
+            &mut tx,
+            order_id,
+            PAYROLL_EXPENSE_ACCOUNT,
+            rounded_cost,
+            Decimal::ZERO,
+            &format!("{memo_prefix}|DEBIT"),
+        )
+        .await
+        .map_err(internal_error)?;
+        insert_journal_line(
+            &mut tx,
+            order_id,
+            PAYROLL_CLEARING_ACCOUNT,
+            Decimal::ZERO,
+            rounded_cost,
+            &format!("{memo_prefix}|CREDIT"),
+        )
+        .await
+        .map_err(internal_error)?;
+        journal_total += rounded_cost;
+
+        sqlx::query(
+            r#"
+            INSERT INTO agent_semantic_memory (
+                id, agent_name, scope, entity_id, content, keywords, source_ref, created_at
+            )
+            VALUES ($1, 'payroll-agent', 'ORDER_COST_ALLOCATION', $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(order_id)
+        .bind(format!(
+            "Allocated autonomous operating cost {} {} for order {} in period {} to {}",
+            rounded_cost, currency, order_id, period_key, PAYROLL_EXPENSE_ACCOUNT
+        ))
+        .bind(vec![
+            "payroll".to_string(),
+            "allocation".to_string(),
+            "autonomy-cost".to_string(),
+        ])
+        .bind(format!("finops-period:{period_key}"))
+        .bind(completed_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+    }
+
+    let source_total = source_total.round_dp(4);
+    let allocated_total = allocated_total.round_dp(4);
+    let journal_total = journal_total.round_dp(4);
+    let variance_amount = (source_total - journal_total).abs().round_dp(4);
+    let variance_pct = if source_total > Decimal::ZERO {
+        ((variance_amount / source_total) * Decimal::new(100, 0)).round_dp(4)
+    } else {
+        Decimal::ZERO
+    };
+
+    let status = if source_total == Decimal::ZERO {
+        "NO_SOURCE_COSTS".to_string()
+    } else if variance_pct <= finops_variance_threshold_pct() {
+        "BALANCED".to_string()
+    } else {
+        "OUT_OF_TOLERANCE".to_string()
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO finops_period_reconciliations (
+            period_start, period_end, source_total, allocated_total, journal_total,
+            variance_amount, variance_pct, orders_allocated, status, completed_by_agent_id, completed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (period_start, period_end)
+        DO UPDATE SET
+            source_total = EXCLUDED.source_total,
+            allocated_total = EXCLUDED.allocated_total,
+            journal_total = EXCLUDED.journal_total,
+            variance_amount = EXCLUDED.variance_amount,
+            variance_pct = EXCLUDED.variance_pct,
+            orders_allocated = EXCLUDED.orders_allocated,
+            status = EXCLUDED.status,
+            completed_by_agent_id = EXCLUDED.completed_by_agent_id,
+            completed_at = EXCLUDED.completed_at
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .bind(source_total)
+    .bind(allocated_total)
+    .bind(journal_total)
+    .bind(variance_amount)
+    .bind(variance_pct)
+    .bind(orders.len() as i64)
+    .bind(&status)
+    .bind(&requested_by_agent_id)
+    .bind(completed_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    tx.commit().await.map_err(internal_error)?;
+
+    Ok(Json(AllocateCostsResponse {
+        period_start,
+        period_end,
+        orders_allocated: orders.len() as i64,
+        source_total,
+        allocated_total,
+        journal_total,
+        variance_amount,
+        variance_pct,
+        status,
+        completed_at,
+    }))
+}
+
+async fn list_fulfilled_orders(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> AnyResult<Vec<FulfilledOrder>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, (quantity * unit_price) AS revenue
+        FROM orders
+        WHERE status = 'FULFILLED'
+          AND fulfilled_at IS NOT NULL
+          AND fulfilled_at >= $1
+          AND fulfilled_at < $2
+        ORDER BY id
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut orders = Vec::with_capacity(rows.len());
+    for row in rows {
+        orders.push(FulfilledOrder {
+            order_id: row.try_get("id")?,
+            revenue: row.try_get::<Decimal, _>("revenue")?.round_dp(4),
+        });
+    }
+
+    Ok(orders)
+}
+
+async fn allocate_input_cost(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    orders: &[FulfilledOrder],
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    input: &AllocationInput,
+) -> AnyResult<Decimal> {
+    if input.amount <= Decimal::ZERO {
+        return Ok(Decimal::ZERO);
+    }
+
+    let allocations = if let Some(order_id) = input.order_id {
+        vec![(order_id, input.amount.round_dp(4), "DIRECT_ORDER")]
+    } else {
+        let total_revenue = orders
+            .iter()
+            .fold(Decimal::ZERO, |acc, order| acc + order.revenue)
+            .round_dp(4);
+
+        if total_revenue > Decimal::ZERO {
+            let mut remaining = input.amount.round_dp(4);
+            let mut distributed = Vec::with_capacity(orders.len());
+            for (idx, order) in orders.iter().enumerate() {
+                let amount = if idx == orders.len() - 1 {
+                    remaining.round_dp(4)
+                } else {
+                    let provisional = (input.amount * order.revenue / total_revenue).round_dp(4);
+                    remaining = (remaining - provisional).round_dp(4);
+                    provisional
+                };
+                distributed.push((order.order_id, amount, "REVENUE_SHARE"));
+            }
+            distributed
+        } else {
+            let count = Decimal::from(orders.len() as i64);
+            let per_order = (input.amount / count).round_dp(4);
+            let mut remaining = input.amount.round_dp(4);
+            let mut distributed = Vec::with_capacity(orders.len());
+            for (idx, order) in orders.iter().enumerate() {
+                let amount = if idx == orders.len() - 1 {
+                    remaining.round_dp(4)
+                } else {
+                    remaining = (remaining - per_order).round_dp(4);
+                    per_order
+                };
+                distributed.push((order.order_id, amount, "REVENUE_SHARE"));
+            }
+            distributed
+        }
+    };
+
+    let mut allocated_total = Decimal::ZERO;
+    for (order_id, amount, basis) in allocations {
+        if amount <= Decimal::ZERO {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO finops_cost_allocations (
+                id, period_start, period_end, order_id, source_type, source_id, agent_id,
+                skill_id, allocation_basis, allocated_cost, currency, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(period_start)
+        .bind(period_end)
+        .bind(order_id)
+        .bind(input.source_type)
+        .bind(input.source_id)
+        .bind(input.agent_id.as_deref())
+        .bind(input.skill_id.as_deref())
+        .bind(basis)
+        .bind(amount.round_dp(4))
+        .bind(input.currency.as_str())
+        .bind(Utc::now())
+        .execute(&mut **tx)
+        .await?;
+
+        allocated_total += amount;
+    }
+
+    Ok(allocated_total.round_dp(4))
+}
+
+async fn insert_journal_line(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    account: &str,
+    debit: Decimal,
+    credit: Decimal,
+    memo: &str,
+) -> AnyResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO journals (id, order_id, account, debit, credit, memo, posted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(order_id)
+    .bind(account)
+    .bind(debit)
+    .bind(credit)
+    .bind(memo)
+    .bind(Utc::now())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn ensure_order_exists(pool: &PgPool, order_id: Uuid) -> Result<(), (StatusCode, String)> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM orders WHERE id = $1)")
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .map_err(internal_error)?;
+
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "order not found".to_string()));
+    }
+
+    Ok(())
+}
+
 async fn evaluate_policy_gate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     action_type: &str,
@@ -1237,6 +2082,18 @@ fn validate_governance_actor(agent_id: &str) -> AnyResult<String> {
     Ok(normalized)
 }
 
+fn validate_finops_actor(agent_id: &str) -> AnyResult<String> {
+    let normalized = validate_agent_id(agent_id)?;
+    if !FINOPS_ACTOR_IDS
+        .iter()
+        .any(|registered| *registered == normalized.as_str())
+    {
+        anyhow::bail!("agent is not authorized for finops operations");
+    }
+
+    Ok(normalized)
+}
+
 fn action_type_for_transaction(transaction_type: &str) -> &'static str {
     if transaction_type == "SERVICE" {
         ACTION_ORDER_EXECUTION_SERVICE
@@ -1250,6 +2107,25 @@ fn normalize_transaction_type(value: &str) -> AnyResult<String> {
     match normalized.as_str() {
         "PRODUCT" | "SERVICE" => Ok(normalized),
         _ => anyhow::bail!("transaction_type must be PRODUCT or SERVICE"),
+    }
+}
+
+fn normalize_currency(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        anyhow::bail!("currency is required");
+    }
+    if normalized.len() != 3 {
+        anyhow::bail!("currency must be a 3-letter code");
+    }
+    Ok(normalized)
+}
+
+fn normalize_cloud_cost_type(value: &str) -> AnyResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "COMPUTE" | "STORAGE" | "NETWORK" => Ok(normalized),
+        _ => anyhow::bail!("cost_type must be one of COMPUTE, STORAGE, NETWORK"),
     }
 }
 
@@ -1271,6 +2147,10 @@ fn normalize_decision_status(value: &str) -> AnyResult<String> {
 
 fn default_auto_approval_limit() -> Decimal {
     Decimal::new(100000000, 2) // 1,000,000.00
+}
+
+fn finops_variance_threshold_pct() -> Decimal {
+    Decimal::new(5, 1) // 0.5%
 }
 
 fn invalid_request(err: anyhow::Error) -> (StatusCode, String) {

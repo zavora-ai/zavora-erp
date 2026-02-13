@@ -257,6 +257,71 @@ curl -X POST http://localhost:8080/orders \
   }'
 ```
 
+Ingest token usage cost (FU-10):
+
+```bash
+curl -X POST http://localhost:8080/finops/token-usage \
+  -H 'content-type: application/json' \
+  -d '{
+    "order_id": "ORDER_ID",
+    "agent_id": "sales-agent",
+    "skill_id": "quote-negotiation:v1",
+    "action_name": "draft_quote_terms",
+    "input_tokens": 1200,
+    "output_tokens": 800,
+    "token_unit_cost": "0.000002",
+    "currency": "USD",
+    "source_ref": "llm-run:demo-001",
+    "ingested_by_agent_id": "payroll-agent"
+  }'
+```
+
+Ingest cloud infrastructure cost (FU-10):
+
+```bash
+curl -X POST http://localhost:8080/finops/cloud-costs \
+  -H 'content-type: application/json' \
+  -d '{
+    "order_id": "ORDER_ID",
+    "provider": "aws",
+    "cost_type": "COMPUTE",
+    "usage_quantity": "2.50",
+    "unit_cost": "0.0400",
+    "currency": "USD",
+    "source_ref": "cloud-bill:demo-001",
+    "ingested_by_agent_id": "payroll-agent"
+  }'
+```
+
+Ingest subscription/tool cost (FU-10):
+
+```bash
+curl -X POST http://localhost:8080/finops/subscriptions \
+  -H 'content-type: application/json' \
+  -d '{
+    "tool_name": "adk-rust-runtime",
+    "subscription_name": "team-plan",
+    "period_start": "2026-02-01T00:00:00Z",
+    "period_end": "2026-03-01T00:00:00Z",
+    "total_cost": "300.00",
+    "currency": "USD",
+    "source_ref": "vendor-invoice:2026-02",
+    "ingested_by_agent_id": "payroll-agent"
+  }'
+```
+
+Run deterministic cost allocation + payroll journal posting for a period:
+
+```bash
+curl -X POST http://localhost:8080/finops/allocate \
+  -H 'content-type: application/json' \
+  -d '{
+    "period_start": "2026-02-01T00:00:00Z",
+    "period_end": "2026-03-01T00:00:00Z",
+    "requested_by_agent_id": "payroll-agent"
+  }'
+```
+
 Read board pack:
 
 ```bash
@@ -300,7 +365,9 @@ Note:
 - Current baseline supports both product and service transactions.
 - Business origination (`lead -> opportunity -> quote -> acceptance`) now creates executable demand via order creation and workflow dispatch.
 - Board pack includes pipeline and governance counters (`leads_total`, `opportunities_open`, `quotes_issued`, `quotes_accepted`, `orders_pending_approval`, `governance_escalations_pending`) in addition to fulfillment and finance metrics.
+- Board pack now includes autonomy economics (`autonomy_operating_cost`, `margin_after_autonomy_cost`, `revenue_to_agent_payroll_ratio`, reconciliation status/variance).
 - Audit evidence API returns linked order/origination/governance/finance/inventory/memory artifacts plus a replayable timeline for each order.
+- Audit evidence now includes `payroll_allocations` and margin-after-autonomy totals per order.
 
 ## 6) Functional Verification Evidence
 
