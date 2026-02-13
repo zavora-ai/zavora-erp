@@ -50,6 +50,12 @@ struct AgingQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct LedgerQuery {
+    order_id: Option<Uuid>,
+    limit: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct SkillUnitEconomicsResponse {
     generated_at: DateTime<Utc>,
@@ -193,6 +199,30 @@ struct ApAgingResponse {
     total_outstanding_ap: Decimal,
     buckets: AgingBucketTotals,
     items: Vec<ApAgingRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct FinanceInvoicesResponse {
+    generated_at: DateTime<Utc>,
+    items: Vec<AuditInvoiceRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct FinanceArSubledgerResponse {
+    generated_at: DateTime<Utc>,
+    items: Vec<AuditArSubledgerEntryRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct FinanceApObligationsResponse {
+    generated_at: DateTime<Utc>,
+    items: Vec<AuditApObligationRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct FinanceApSubledgerResponse {
+    generated_at: DateTime<Utc>,
+    items: Vec<AuditApSubledgerEntryRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -549,6 +579,10 @@ async fn main() -> AnyResult<()> {
         .route("/revenue/tracking", get(revenue_tracking))
         .route("/finance/ar-aging", get(ar_aging))
         .route("/finance/ap-aging", get(ap_aging))
+        .route("/finance/invoices", get(finance_invoices))
+        .route("/finance/ar-subledger", get(finance_ar_subledger))
+        .route("/finance/ap-obligations", get(finance_ap_obligations))
+        .route("/finance/ap-subledger", get(finance_ap_subledger))
         .route("/board/skills/unit-economics", get(skill_unit_economics))
         .route("/board/skills/telemetry", get(skill_telemetry))
         .route("/audit/orders/{order_id}/evidence", get(order_evidence))
@@ -1282,6 +1316,228 @@ async fn ap_aging(
         as_of,
         total_outstanding_ap: total_outstanding_ap.round_dp(4),
         buckets,
+        items,
+    }))
+}
+
+async fn finance_invoices(
+    State(state): State<AppState>,
+    Query(query): Query<LedgerQuery>,
+) -> std::result::Result<Json<FinanceInvoicesResponse>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            order_id,
+            invoice_number,
+            customer_email,
+            amount,
+            currency,
+            status,
+            issued_at,
+            due_at,
+            settled_at,
+            created_by_agent_id,
+            created_at,
+            updated_at
+        FROM invoices
+        WHERE ($1::uuid IS NULL OR order_id = $1)
+        ORDER BY issued_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(query.order_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(AuditInvoiceRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            invoice_number: row.try_get("invoice_number").map_err(internal_error)?,
+            customer_email: row.try_get("customer_email").map_err(internal_error)?,
+            amount: row.try_get("amount").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            issued_at: row.try_get("issued_at").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            settled_at: row.try_get("settled_at").map_err(internal_error)?,
+            created_by_agent_id: row.try_get("created_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(FinanceInvoicesResponse {
+        generated_at: Utc::now(),
+        items,
+    }))
+}
+
+async fn finance_ar_subledger(
+    State(state): State<AppState>,
+    Query(query): Query<LedgerQuery>,
+) -> std::result::Result<Json<FinanceArSubledgerResponse>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(500).clamp(1, 2000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            invoice_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        FROM ar_subledger_entries
+        WHERE ($1::uuid IS NULL OR order_id = $1)
+        ORDER BY posted_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(query.order_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(AuditArSubledgerEntryRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            invoice_id: row.try_get("invoice_id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            entry_type: row.try_get("entry_type").map_err(internal_error)?,
+            debit: row.try_get("debit").map_err(internal_error)?,
+            credit: row.try_get("credit").map_err(internal_error)?,
+            balance_after: row.try_get("balance_after").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            memo: row.try_get("memo").map_err(internal_error)?,
+            posted_by_agent_id: row.try_get("posted_by_agent_id").map_err(internal_error)?,
+            posted_at: row.try_get("posted_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(FinanceArSubledgerResponse {
+        generated_at: Utc::now(),
+        items,
+    }))
+}
+
+async fn finance_ap_obligations(
+    State(state): State<AppState>,
+    Query(query): Query<LedgerQuery>,
+) -> std::result::Result<Json<FinanceApObligationsResponse>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(500).clamp(1, 2000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            order_id,
+            source_type,
+            counterparty,
+            amount,
+            currency,
+            status,
+            due_at,
+            settled_at,
+            created_by_agent_id,
+            created_at,
+            updated_at
+        FROM ap_obligations
+        WHERE ($1::uuid IS NULL OR order_id = $1)
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(query.order_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(AuditApObligationRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            source_type: row.try_get("source_type").map_err(internal_error)?,
+            counterparty: row.try_get("counterparty").map_err(internal_error)?,
+            amount: row.try_get("amount").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            settled_at: row.try_get("settled_at").map_err(internal_error)?,
+            created_by_agent_id: row.try_get("created_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(FinanceApObligationsResponse {
+        generated_at: Utc::now(),
+        items,
+    }))
+}
+
+async fn finance_ap_subledger(
+    State(state): State<AppState>,
+    Query(query): Query<LedgerQuery>,
+) -> std::result::Result<Json<FinanceApSubledgerResponse>, (axum::http::StatusCode, String)> {
+    let limit = query.limit.unwrap_or(500).clamp(1, 2000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            ap_obligation_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        FROM ap_subledger_entries
+        WHERE ($1::uuid IS NULL OR order_id = $1)
+        ORDER BY posted_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(query.order_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(AuditApSubledgerEntryRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            ap_obligation_id: row.try_get("ap_obligation_id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            entry_type: row.try_get("entry_type").map_err(internal_error)?,
+            debit: row.try_get("debit").map_err(internal_error)?,
+            credit: row.try_get("credit").map_err(internal_error)?,
+            balance_after: row.try_get("balance_after").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            memo: row.try_get("memo").map_err(internal_error)?,
+            posted_by_agent_id: row.try_get("posted_by_agent_id").map_err(internal_error)?,
+            posted_at: row.try_get("posted_at").map_err(internal_error)?,
+        });
+    }
+
+    Ok(Json(FinanceApSubledgerResponse {
+        generated_at: Utc::now(),
         items,
     }))
 }
