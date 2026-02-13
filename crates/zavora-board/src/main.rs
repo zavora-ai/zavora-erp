@@ -235,6 +235,10 @@ struct OrderEvidencePackage {
     escalations: Vec<AuditEscalationRecord>,
     inventory_movements: Vec<AuditInventoryMovementRecord>,
     journals: Vec<AuditJournalRecord>,
+    invoice: Option<AuditInvoiceRecord>,
+    ar_subledger_entries: Vec<AuditArSubledgerEntryRecord>,
+    ap_obligations: Vec<AuditApObligationRecord>,
+    ap_subledger_entries: Vec<AuditApSubledgerEntryRecord>,
     settlements: Vec<AuditSettlementRecord>,
     payroll_allocations: Vec<AuditPayrollAllocationRecord>,
     skill_invocations: Vec<AuditSkillInvocationRecord>,
@@ -380,6 +384,69 @@ struct AuditSettlementRecord {
 }
 
 #[derive(Debug, Serialize)]
+struct AuditInvoiceRecord {
+    id: Uuid,
+    order_id: Uuid,
+    invoice_number: String,
+    customer_email: String,
+    amount: Decimal,
+    currency: String,
+    status: String,
+    issued_at: DateTime<Utc>,
+    due_at: DateTime<Utc>,
+    settled_at: Option<DateTime<Utc>>,
+    created_by_agent_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditArSubledgerEntryRecord {
+    id: Uuid,
+    invoice_id: Uuid,
+    order_id: Uuid,
+    entry_type: String,
+    debit: Decimal,
+    credit: Decimal,
+    balance_after: Decimal,
+    currency: String,
+    memo: String,
+    posted_by_agent_id: String,
+    posted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditApObligationRecord {
+    id: Uuid,
+    order_id: Uuid,
+    source_type: String,
+    counterparty: String,
+    amount: Decimal,
+    currency: String,
+    status: String,
+    due_at: DateTime<Utc>,
+    settled_at: Option<DateTime<Utc>>,
+    created_by_agent_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditApSubledgerEntryRecord {
+    id: Uuid,
+    ap_obligation_id: Uuid,
+    order_id: Uuid,
+    entry_type: String,
+    debit: Decimal,
+    credit: Decimal,
+    balance_after: Decimal,
+    currency: String,
+    memo: String,
+    posted_by_agent_id: String,
+    posted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
 struct AuditPayrollAllocationRecord {
     id: Uuid,
     period_start: DateTime<Utc>,
@@ -449,6 +516,9 @@ struct AuditTimelineEvent {
 #[derive(Debug, Serialize)]
 struct AuditTotals {
     line_value_total: Decimal,
+    invoice_total: Decimal,
+    ar_open_balance: Decimal,
+    ap_open_balance: Decimal,
     journal_debit_total: Decimal,
     journal_credit_total: Decimal,
     cogs_total: Decimal,
@@ -1811,6 +1881,184 @@ async fn order_evidence(
         });
     }
 
+    let invoice_row = sqlx::query(
+        r#"
+        SELECT
+            id,
+            order_id,
+            invoice_number,
+            customer_email,
+            amount,
+            currency,
+            status,
+            issued_at,
+            due_at,
+            settled_at,
+            created_by_agent_id,
+            created_at,
+            updated_at
+        FROM invoices
+        WHERE order_id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(order_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let invoice = if let Some(row) = invoice_row {
+        Some(AuditInvoiceRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            invoice_number: row.try_get("invoice_number").map_err(internal_error)?,
+            customer_email: row.try_get("customer_email").map_err(internal_error)?,
+            amount: row.try_get("amount").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            issued_at: row.try_get("issued_at").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            settled_at: row.try_get("settled_at").map_err(internal_error)?,
+            created_by_agent_id: row.try_get("created_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        })
+    } else {
+        None
+    };
+
+    let ar_subledger_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            invoice_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        FROM ar_subledger_entries
+        WHERE order_id = $1
+        ORDER BY
+            posted_at,
+            CASE entry_type
+                WHEN 'INVOICE_ISSUED' THEN 0
+                WHEN 'PAYMENT_RECEIVED' THEN 1
+                ELSE 2
+            END,
+            id
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut ar_subledger_entries = Vec::with_capacity(ar_subledger_rows.len());
+    for row in ar_subledger_rows {
+        ar_subledger_entries.push(AuditArSubledgerEntryRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            invoice_id: row.try_get("invoice_id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            entry_type: row.try_get("entry_type").map_err(internal_error)?,
+            debit: row.try_get("debit").map_err(internal_error)?,
+            credit: row.try_get("credit").map_err(internal_error)?,
+            balance_after: row.try_get("balance_after").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            memo: row.try_get("memo").map_err(internal_error)?,
+            posted_by_agent_id: row.try_get("posted_by_agent_id").map_err(internal_error)?,
+            posted_at: row.try_get("posted_at").map_err(internal_error)?,
+        });
+    }
+
+    let ap_obligation_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            order_id,
+            source_type,
+            counterparty,
+            amount,
+            currency,
+            status,
+            due_at,
+            settled_at,
+            created_by_agent_id,
+            created_at,
+            updated_at
+        FROM ap_obligations
+        WHERE order_id = $1
+        ORDER BY created_at, id
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut ap_obligations = Vec::with_capacity(ap_obligation_rows.len());
+    for row in ap_obligation_rows {
+        ap_obligations.push(AuditApObligationRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            source_type: row.try_get("source_type").map_err(internal_error)?,
+            counterparty: row.try_get("counterparty").map_err(internal_error)?,
+            amount: row.try_get("amount").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            settled_at: row.try_get("settled_at").map_err(internal_error)?,
+            created_by_agent_id: row.try_get("created_by_agent_id").map_err(internal_error)?,
+            created_at: row.try_get("created_at").map_err(internal_error)?,
+            updated_at: row.try_get("updated_at").map_err(internal_error)?,
+        });
+    }
+
+    let ap_subledger_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            ap_obligation_id,
+            order_id,
+            entry_type,
+            debit,
+            credit,
+            balance_after,
+            currency,
+            memo,
+            posted_by_agent_id,
+            posted_at
+        FROM ap_subledger_entries
+        WHERE order_id = $1
+        ORDER BY posted_at, id
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut ap_subledger_entries = Vec::with_capacity(ap_subledger_rows.len());
+    for row in ap_subledger_rows {
+        ap_subledger_entries.push(AuditApSubledgerEntryRecord {
+            id: row.try_get("id").map_err(internal_error)?,
+            ap_obligation_id: row.try_get("ap_obligation_id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            entry_type: row.try_get("entry_type").map_err(internal_error)?,
+            debit: row.try_get("debit").map_err(internal_error)?,
+            credit: row.try_get("credit").map_err(internal_error)?,
+            balance_after: row.try_get("balance_after").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            memo: row.try_get("memo").map_err(internal_error)?,
+            posted_by_agent_id: row.try_get("posted_by_agent_id").map_err(internal_error)?,
+            posted_at: row.try_get("posted_at").map_err(internal_error)?,
+        });
+    }
+
     let settlement_rows = sqlx::query(
         r#"
         SELECT id, amount, currency, received_at
@@ -2075,6 +2323,63 @@ async fn order_evidence(
         });
     }
 
+    if let Some(ref invoice_record) = invoice {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: invoice_record.issued_at,
+            event_type: "INVOICE_ISSUED".to_string(),
+            source: "invoices".to_string(),
+            details: format!(
+                "invoice={} amount={} {} due_at={} status={}",
+                invoice_record.invoice_number,
+                invoice_record.amount,
+                invoice_record.currency,
+                invoice_record.due_at,
+                invoice_record.status
+            ),
+        });
+    }
+
+    for entry in &ar_subledger_entries {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: entry.posted_at,
+            event_type: format!("AR_{}", entry.entry_type),
+            source: "ar_subledger_entries".to_string(),
+            details: format!(
+                "debit={} credit={} balance_after={} memo={}",
+                entry.debit, entry.credit, entry.balance_after, entry.memo
+            ),
+        });
+    }
+
+    for obligation in &ap_obligations {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: obligation.created_at,
+            event_type: "AP_OBLIGATION_RECORDED".to_string(),
+            source: "ap_obligations".to_string(),
+            details: format!(
+                "source_type={} counterparty={} amount={} {} status={} due_at={}",
+                obligation.source_type,
+                obligation.counterparty,
+                obligation.amount,
+                obligation.currency,
+                obligation.status,
+                obligation.due_at
+            ),
+        });
+    }
+
+    for entry in &ap_subledger_entries {
+        timeline.push(AuditTimelineEvent {
+            occurred_at: entry.posted_at,
+            event_type: format!("AP_{}", entry.entry_type),
+            source: "ap_subledger_entries".to_string(),
+            details: format!(
+                "debit={} credit={} balance_after={} memo={}",
+                entry.debit, entry.credit, entry.balance_after, entry.memo
+            ),
+        });
+    }
+
     for journal in &journals {
         timeline.push(AuditTimelineEvent {
             occurred_at: journal.posted_at,
@@ -2192,6 +2497,19 @@ async fn order_evidence(
     timeline.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at));
 
     let line_value_total = (order.quantity * order.unit_price).round_dp(4);
+    let invoice_total = invoice
+        .as_ref()
+        .map(|record| record.amount)
+        .unwrap_or(Decimal::ZERO)
+        .round_dp(4);
+    let ar_open_balance = ar_subledger_entries
+        .iter()
+        .fold(Decimal::ZERO, |acc, line| acc + line.debit - line.credit)
+        .round_dp(4);
+    let ap_open_balance = ap_subledger_entries
+        .iter()
+        .fold(Decimal::ZERO, |acc, line| acc + line.credit - line.debit)
+        .round_dp(4);
     let journal_debit_total = journals
         .iter()
         .fold(Decimal::ZERO, |acc, line| acc + line.debit)
@@ -2227,6 +2545,10 @@ async fn order_evidence(
         escalations,
         inventory_movements,
         journals,
+        invoice,
+        ar_subledger_entries,
+        ap_obligations,
+        ap_subledger_entries,
         settlements,
         payroll_allocations,
         skill_invocations,
@@ -2235,6 +2557,9 @@ async fn order_evidence(
         timeline,
         totals: AuditTotals {
             line_value_total,
+            invoice_total,
+            ar_open_balance,
+            ap_open_balance,
             journal_debit_total,
             journal_credit_total,
             cogs_total,
