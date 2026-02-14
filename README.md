@@ -436,6 +436,19 @@ curl -X POST http://localhost:8080/finops/allocate \
   }'
 ```
 
+To create deferred payroll AP obligations (open until explicitly settled), set `settle_payroll_ap` to `false`:
+
+```bash
+curl -X POST http://localhost:8080/finops/allocate \
+  -H 'content-type: application/json' \
+  -d '{
+    "period_start": "2026-02-01T00:00:00Z",
+    "period_end": "2026-03-01T00:00:00Z",
+    "requested_by_agent_id": "payroll-agent",
+    "settle_payroll_ap": false
+  }'
+```
+
 Read board pack:
 
 ```bash
@@ -457,6 +470,18 @@ Read revenue tracking and aging views (FU-06/FU-05 visibility):
 curl "http://localhost:8090/revenue/tracking?period_start=2026-02-01T00:00:00Z&period_end=2026-03-01T00:00:00Z"
 curl "http://localhost:8090/finance/ar-aging"
 curl "http://localhost:8090/finance/ap-aging"
+curl "http://localhost:8090/finance/ap-exceptions?source_type=AUTONOMY_PAYROLL"
+```
+
+Settle an open AP obligation (works for `PROCUREMENT`, `SERVICE_DELIVERY`, `AUTONOMY_PAYROLL`):
+
+```bash
+curl -X POST http://localhost:8080/finance/ap/settle \
+  -H 'content-type: application/json' \
+  -d '{
+    "ap_obligation_id": "AP_OBLIGATION_ID",
+    "requested_by_agent_id": "controller-agent"
+  }'
 ```
 
 Read skill unit economics view (FR-056):

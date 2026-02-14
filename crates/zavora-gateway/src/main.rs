@@ -42,6 +42,8 @@ const FINOPS_ACTOR_IDS: [&str; 3] = ["payroll-agent", "controller-agent", "board
 const ACTION_ORDER_EXECUTION_PRODUCT: &str = "ORDER_EXECUTION_PRODUCT";
 const ACTION_ORDER_EXECUTION_SERVICE: &str = "ORDER_EXECUTION_SERVICE";
 const CASH_ACCOUNT: &str = "1000";
+const PROCUREMENT_AP_ACCOUNT: &str = "2100";
+const SERVICE_COST_CLEARING_ACCOUNT: &str = "2200";
 const PAYROLL_EXPENSE_ACCOUNT: &str = "5100";
 const PAYROLL_AP_ACCOUNT: &str = "2300";
 const AP_DEFAULT_TERMS_DAYS: i64 = 30;
@@ -222,16 +224,17 @@ struct AllocateCostsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SettlePayrollApRequest {
+struct SettleApRequest {
     ap_obligation_id: Uuid,
     requested_by_agent_id: String,
     settlement_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SettlePayrollApResponse {
+struct SettleApResponse {
     ap_obligation_id: Uuid,
     order_id: Uuid,
+    source_type: String,
     previous_status: String,
     status: String,
     settled_amount: Decimal,
@@ -707,6 +710,7 @@ async fn main() -> AnyResult<()> {
         .route("/finops/cloud-costs", post(ingest_cloud_cost))
         .route("/finops/subscriptions", post(ingest_subscription_cost))
         .route("/finops/allocate", post(allocate_costs))
+        .route("/finance/ap/settle", post(settle_ap))
         .route("/finops/payroll-ap/settle", post(settle_payroll_ap))
         .route(
             "/skills/registry",
@@ -4485,8 +4489,24 @@ async fn create_and_settle_payroll_ap_obligation(
 
 async fn settle_payroll_ap(
     State(state): State<AppState>,
-    Json(payload): Json<SettlePayrollApRequest>,
-) -> Result<Json<SettlePayrollApResponse>, (StatusCode, String)> {
+    Json(payload): Json<SettleApRequest>,
+) -> Result<Json<SettleApResponse>, (StatusCode, String)> {
+    settle_ap_internal(state, payload, Some("AUTONOMY_PAYROLL"), "PAYROLL_AP_RETRY").await
+}
+
+async fn settle_ap(
+    State(state): State<AppState>,
+    Json(payload): Json<SettleApRequest>,
+) -> Result<Json<SettleApResponse>, (StatusCode, String)> {
+    settle_ap_internal(state, payload, None, "AP_SETTLEMENT").await
+}
+
+async fn settle_ap_internal(
+    state: AppState,
+    payload: SettleApRequest,
+    expected_source_type: Option<&str>,
+    memo_namespace: &str,
+) -> Result<Json<SettleApResponse>, (StatusCode, String)> {
     let requested_by_agent_id = validate_finops_actor(&payload.requested_by_agent_id)
         .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
 
@@ -4496,8 +4516,8 @@ async fn settle_payroll_ap(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| format!("PAYROLL_AP_RETRY|{value}"))
-        .unwrap_or_else(|| format!("PAYROLL_AP_RETRY|{}", payload.ap_obligation_id));
+        .map(|value| format!("{memo_namespace}|{value}"))
+        .unwrap_or_else(|| format!("{memo_namespace}|{}", payload.ap_obligation_id));
 
     let mut tx = state.pool.begin().await.map_err(internal_error)?;
     let row = sqlx::query(
@@ -4518,10 +4538,12 @@ async fn settle_payroll_ap(
     };
 
     let source_type: String = row.try_get("source_type").map_err(internal_error)?;
-    if source_type != "AUTONOMY_PAYROLL" {
+    if let Some(expected) = expected_source_type
+        && source_type != expected
+    {
         return Err((
             StatusCode::BAD_REQUEST,
-            "ap_obligation is not AUTONOMY_PAYROLL".to_string(),
+            format!("ap_obligation is not {expected}"),
         ));
     }
 
@@ -4531,6 +4553,13 @@ async fn settle_payroll_ap(
     let currency: String = row.try_get("currency").map_err(internal_error)?;
     let existing_settled_at: Option<DateTime<Utc>> =
         row.try_get("settled_at").map_err(internal_error)?;
+    let liability_account =
+        ap_liability_account_for_source_type(&source_type).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unsupported ap source_type {source_type}"),
+            )
+        })?;
 
     if previous_status == "CANCELLED" {
         return Err((
@@ -4573,7 +4602,7 @@ async fn settle_payroll_ap(
                 insert_journal_line(
                     &mut tx,
                     order_id,
-                    PAYROLL_AP_ACCOUNT,
+                    liability_account,
                     settled_amount,
                     Decimal::ZERO,
                     &format!("{memo_root}|AP_SETTLE_DEBIT"),
@@ -4619,9 +4648,10 @@ async fn settle_payroll_ap(
 
     tx.commit().await.map_err(internal_error)?;
 
-    Ok(Json(SettlePayrollApResponse {
+    Ok(Json(SettleApResponse {
         ap_obligation_id,
         order_id,
+        source_type,
         previous_status,
         status: "SETTLED".to_string(),
         settled_amount: settled_amount.round_dp(4),
@@ -4630,6 +4660,15 @@ async fn settle_payroll_ap(
         settled_at,
         already_settled,
     }))
+}
+
+fn ap_liability_account_for_source_type(source_type: &str) -> Option<&'static str> {
+    match source_type {
+        "PROCUREMENT" => Some(PROCUREMENT_AP_ACCOUNT),
+        "SERVICE_DELIVERY" => Some(SERVICE_COST_CLEARING_ACCOUNT),
+        "AUTONOMY_PAYROLL" => Some(PAYROLL_AP_ACCOUNT),
+        _ => None,
+    }
 }
 
 async fn current_ap_obligation_balance(
