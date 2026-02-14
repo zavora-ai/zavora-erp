@@ -204,6 +204,7 @@ struct AllocateCostsRequest {
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
     requested_by_agent_id: String,
+    settle_payroll_ap: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +219,26 @@ struct AllocateCostsResponse {
     variance_pct: Decimal,
     status: String,
     completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SettlePayrollApRequest {
+    ap_obligation_id: Uuid,
+    requested_by_agent_id: String,
+    settlement_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SettlePayrollApResponse {
+    ap_obligation_id: Uuid,
+    order_id: Uuid,
+    previous_status: String,
+    status: String,
+    settled_amount: Decimal,
+    outstanding_before: Decimal,
+    outstanding_after: Decimal,
+    settled_at: DateTime<Utc>,
+    already_settled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +707,7 @@ async fn main() -> AnyResult<()> {
         .route("/finops/cloud-costs", post(ingest_cloud_cost))
         .route("/finops/subscriptions", post(ingest_subscription_cost))
         .route("/finops/allocate", post(allocate_costs))
+        .route("/finops/payroll-ap/settle", post(settle_payroll_ap))
         .route(
             "/skills/registry",
             get(list_skill_registry).post(upsert_skill_registry),
@@ -3755,6 +3777,7 @@ async fn allocate_costs(
 
     let period_start = payload.period_start;
     let period_end = payload.period_end;
+    let settle_payroll_ap = payload.settle_payroll_ap.unwrap_or(true);
     let period_key = format!("{}|{}", period_start.to_rfc3339(), period_end.to_rfc3339());
     let order_ids: Vec<Uuid> = orders.iter().map(|order| order.order_id).collect();
     let delete_memo_pattern = format!("PAYROLL_ALLOC|{period_key}|%");
@@ -3964,6 +3987,7 @@ async fn allocate_costs(
             &payroll_counterparty,
             &memo_prefix,
             completed_at,
+            settle_payroll_ap,
         )
         .await
         .map_err(internal_error)?;
@@ -4359,6 +4383,7 @@ async fn create_and_settle_payroll_ap_obligation(
     counterparty: &str,
     memo_prefix: &str,
     posted_at: DateTime<Utc>,
+    settle_immediately: bool,
 ) -> AnyResult<()> {
     let rounded_amount = amount.round_dp(4);
     if rounded_amount <= Decimal::ZERO {
@@ -4402,6 +4427,11 @@ async fn create_and_settle_payroll_ap_obligation(
         posted_at,
     )
     .await?;
+
+    if !settle_immediately {
+        return Ok(());
+    }
+
     insert_ap_subledger_line(
         tx,
         obligation_id,
@@ -4451,6 +4481,175 @@ async fn create_and_settle_payroll_ap_obligation(
     .await?;
 
     Ok(())
+}
+
+async fn settle_payroll_ap(
+    State(state): State<AppState>,
+    Json(payload): Json<SettlePayrollApRequest>,
+) -> Result<Json<SettlePayrollApResponse>, (StatusCode, String)> {
+    let requested_by_agent_id = validate_finops_actor(&payload.requested_by_agent_id)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let now = Utc::now();
+    let memo_root = payload
+        .settlement_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("PAYROLL_AP_RETRY|{value}"))
+        .unwrap_or_else(|| format!("PAYROLL_AP_RETRY|{}", payload.ap_obligation_id));
+
+    let mut tx = state.pool.begin().await.map_err(internal_error)?;
+    let row = sqlx::query(
+        r#"
+        SELECT id, order_id, source_type, status, currency, settled_at
+        FROM ap_obligations
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(payload.ap_obligation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "ap_obligation not found".to_string()));
+    };
+
+    let source_type: String = row.try_get("source_type").map_err(internal_error)?;
+    if source_type != "AUTONOMY_PAYROLL" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "ap_obligation is not AUTONOMY_PAYROLL".to_string(),
+        ));
+    }
+
+    let ap_obligation_id: Uuid = row.try_get("id").map_err(internal_error)?;
+    let order_id: Uuid = row.try_get("order_id").map_err(internal_error)?;
+    let previous_status: String = row.try_get("status").map_err(internal_error)?;
+    let currency: String = row.try_get("currency").map_err(internal_error)?;
+    let existing_settled_at: Option<DateTime<Utc>> =
+        row.try_get("settled_at").map_err(internal_error)?;
+
+    if previous_status == "CANCELLED" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cannot settle a CANCELLED ap_obligation".to_string(),
+        ));
+    }
+
+    let outstanding_before = current_ap_obligation_balance(&mut tx, ap_obligation_id)
+        .await
+        .map_err(internal_error)?;
+
+    let (settled_amount, outstanding_after, settled_at, already_settled) =
+        if previous_status == "SETTLED" && outstanding_before <= Decimal::new(1, 4) {
+            (
+                Decimal::ZERO,
+                outstanding_before.round_dp(4),
+                existing_settled_at.unwrap_or(now),
+                true,
+            )
+        } else {
+            let settled_amount = outstanding_before.round_dp(4);
+            if settled_amount > Decimal::new(1, 4) {
+                insert_ap_subledger_line(
+                    &mut tx,
+                    ap_obligation_id,
+                    order_id,
+                    "PAYMENT_POSTED",
+                    settled_amount,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    &currency,
+                    &format!("{memo_root}|AP_PAYMENT"),
+                    &requested_by_agent_id,
+                    now,
+                )
+                .await
+                .map_err(internal_error)?;
+
+                insert_journal_line(
+                    &mut tx,
+                    order_id,
+                    PAYROLL_AP_ACCOUNT,
+                    settled_amount,
+                    Decimal::ZERO,
+                    &format!("{memo_root}|AP_SETTLE_DEBIT"),
+                )
+                .await
+                .map_err(internal_error)?;
+                insert_journal_line(
+                    &mut tx,
+                    order_id,
+                    CASH_ACCOUNT,
+                    Decimal::ZERO,
+                    settled_amount,
+                    &format!("{memo_root}|AP_SETTLE_CREDIT"),
+                )
+                .await
+                .map_err(internal_error)?;
+            }
+
+            sqlx::query(
+                r#"
+                UPDATE ap_obligations
+                SET status = 'SETTLED',
+                    settled_at = COALESCE(settled_at, $2),
+                    updated_at = $2
+                WHERE id = $1
+                "#,
+            )
+            .bind(ap_obligation_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+
+            (
+                settled_amount,
+                current_ap_obligation_balance(&mut tx, ap_obligation_id)
+                    .await
+                    .map_err(internal_error)?,
+                now,
+                false,
+            )
+        };
+
+    tx.commit().await.map_err(internal_error)?;
+
+    Ok(Json(SettlePayrollApResponse {
+        ap_obligation_id,
+        order_id,
+        previous_status,
+        status: "SETTLED".to_string(),
+        settled_amount: settled_amount.round_dp(4),
+        outstanding_before: outstanding_before.round_dp(4),
+        outstanding_after: outstanding_after.round_dp(4),
+        settled_at,
+        already_settled,
+    }))
+}
+
+async fn current_ap_obligation_balance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ap_obligation_id: Uuid,
+) -> AnyResult<Decimal> {
+    let balance = sqlx::query_scalar::<_, Decimal>(
+        r#"
+        SELECT balance_after
+        FROM ap_subledger_entries
+        WHERE ap_obligation_id = $1
+        ORDER BY posted_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(ap_obligation_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(balance.unwrap_or(Decimal::ZERO).round_dp(4))
 }
 
 #[allow(clippy::too_many_arguments)]

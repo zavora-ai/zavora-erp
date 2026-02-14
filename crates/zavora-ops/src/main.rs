@@ -1390,16 +1390,18 @@ async fn current_ap_obligation_balance(
 ) -> Result<Decimal> {
     let balance = sqlx::query_scalar::<_, Decimal>(
         r#"
-        SELECT COALESCE(MAX(balance_after), 0)
+        SELECT balance_after
         FROM ap_subledger_entries
         WHERE ap_obligation_id = $1
+        ORDER BY posted_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(ap_obligation_id)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
-    Ok(balance.round_dp(4))
+    Ok(balance.unwrap_or(Decimal::ZERO).round_dp(4))
 }
 
 async fn mark_ap_obligation_settled(
@@ -1457,15 +1459,17 @@ async fn post_ap_subledger_entry(
 
     let prior_balance = sqlx::query_scalar::<_, Decimal>(
         r#"
-        SELECT COALESCE(MAX(balance_after), 0)
+        SELECT balance_after
         FROM ap_subledger_entries
         WHERE ap_obligation_id = $1
+        ORDER BY posted_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(ap_obligation_id)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    let balance_after = (prior_balance + credit - debit).round_dp(4);
+    let balance_after = (prior_balance.unwrap_or(Decimal::ZERO) + credit - debit).round_dp(4);
 
     sqlx::query(
         r#"

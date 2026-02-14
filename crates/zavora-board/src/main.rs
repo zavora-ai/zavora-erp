@@ -51,6 +51,14 @@ struct AgingQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ApExceptionQuery {
+    as_of: Option<DateTime<Utc>>,
+    order_id: Option<Uuid>,
+    source_type: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct LedgerQuery {
     order_id: Option<Uuid>,
     limit: Option<i64>,
@@ -199,6 +207,31 @@ struct ApAgingResponse {
     total_outstanding_ap: Decimal,
     buckets: AgingBucketTotals,
     items: Vec<ApAgingRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApExceptionRow {
+    ap_obligation_id: Uuid,
+    order_id: Uuid,
+    source_type: String,
+    account: String,
+    counterparty: String,
+    currency: String,
+    status: String,
+    due_at: DateTime<Utc>,
+    age_days: i64,
+    outstanding_ap: Decimal,
+    bucket: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ApExceptionsResponse {
+    generated_at: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    total_outstanding_ap: Decimal,
+    open_obligations: i64,
+    buckets: AgingBucketTotals,
+    items: Vec<ApExceptionRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -579,6 +612,7 @@ async fn main() -> AnyResult<()> {
         .route("/revenue/tracking", get(revenue_tracking))
         .route("/finance/ar-aging", get(ar_aging))
         .route("/finance/ap-aging", get(ap_aging))
+        .route("/finance/ap-exceptions", get(ap_exceptions))
         .route("/finance/invoices", get(finance_invoices))
         .route("/finance/ar-subledger", get(finance_ar_subledger))
         .route("/finance/ap-obligations", get(finance_ap_obligations))
@@ -1316,6 +1350,114 @@ async fn ap_aging(
         generated_at: Utc::now(),
         as_of,
         total_outstanding_ap: total_outstanding_ap.round_dp(4),
+        buckets,
+        items,
+    }))
+}
+
+async fn ap_exceptions(
+    State(state): State<AppState>,
+    Query(query): Query<ApExceptionQuery>,
+) -> std::result::Result<Json<ApExceptionsResponse>, (axum::http::StatusCode, String)> {
+    let as_of = query.as_of.unwrap_or_else(Utc::now);
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let source_type_filter = query
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            normalize_ap_source_type(value).ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "source_type must be PROCUREMENT, SERVICE_DELIVERY, or AUTONOMY_PAYROLL"
+                    .to_string(),
+            ))
+        })
+        .transpose()?;
+
+    let rows = sqlx::query(
+        r#"
+        WITH ap_balances AS (
+            SELECT
+                apo.id AS ap_obligation_id,
+                apo.order_id,
+                apo.source_type,
+                apo.counterparty,
+                apo.currency,
+                apo.status,
+                apo.due_at,
+                COALESCE(SUM(ase.credit - ase.debit), 0) AS outstanding_ap
+            FROM ap_obligations apo
+            LEFT JOIN ap_subledger_entries ase
+                ON ase.ap_obligation_id = apo.id
+               AND ase.posted_at <= $1
+            WHERE apo.created_at <= $1
+              AND apo.status = 'OPEN'
+              AND ($2::uuid IS NULL OR apo.order_id = $2)
+              AND ($3::text IS NULL OR apo.source_type = $3)
+            GROUP BY
+                apo.id,
+                apo.order_id,
+                apo.source_type,
+                apo.counterparty,
+                apo.currency,
+                apo.status,
+                apo.due_at
+        )
+        SELECT
+            ap_obligation_id,
+            order_id,
+            source_type,
+            counterparty,
+            currency,
+            status,
+            due_at,
+            (EXTRACT(EPOCH FROM ($1::timestamptz - due_at)) / 86400)::BIGINT AS age_days,
+            outstanding_ap
+        FROM ap_balances
+        WHERE outstanding_ap > 0
+        ORDER BY due_at ASC, ap_obligation_id ASC
+        LIMIT $4
+        "#,
+    )
+    .bind(as_of)
+    .bind(query.order_id)
+    .bind(source_type_filter)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut buckets = AgingBucketTotals::default();
+    let mut total_outstanding_ap = Decimal::ZERO;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let source_type: String = row.try_get("source_type").map_err(internal_error)?;
+        let age_days: i64 = row.try_get("age_days").map_err(internal_error)?;
+        let outstanding_ap: Decimal = row.try_get("outstanding_ap").map_err(internal_error)?;
+        let bucket = aging_bucket_label(age_days);
+        accumulate_aging_bucket(&mut buckets, bucket, outstanding_ap);
+        total_outstanding_ap += outstanding_ap;
+        items.push(ApExceptionRow {
+            ap_obligation_id: row.try_get("ap_obligation_id").map_err(internal_error)?,
+            order_id: row.try_get("order_id").map_err(internal_error)?,
+            account: liability_account_for_ap_source(&source_type).to_string(),
+            source_type,
+            counterparty: row.try_get("counterparty").map_err(internal_error)?,
+            currency: row.try_get("currency").map_err(internal_error)?,
+            status: row.try_get("status").map_err(internal_error)?,
+            due_at: row.try_get("due_at").map_err(internal_error)?,
+            age_days,
+            outstanding_ap: outstanding_ap.round_dp(4),
+            bucket: bucket.to_string(),
+        });
+    }
+
+    Ok(Json(ApExceptionsResponse {
+        generated_at: Utc::now(),
+        as_of,
+        total_outstanding_ap: total_outstanding_ap.round_dp(4),
+        open_obligations: items.len() as i64,
         buckets,
         items,
     }))
@@ -2851,6 +2993,23 @@ fn account_category(account: &str) -> Option<&'static str> {
         Some('2') => Some("LIABILITY"),
         Some('3') => Some("EQUITY"),
         _ => None,
+    }
+}
+
+fn normalize_ap_source_type(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "PROCUREMENT" => Some("PROCUREMENT"),
+        "SERVICE_DELIVERY" => Some("SERVICE_DELIVERY"),
+        "AUTONOMY_PAYROLL" => Some("AUTONOMY_PAYROLL"),
+        _ => None,
+    }
+}
+
+fn liability_account_for_ap_source(source_type: &str) -> &'static str {
+    match source_type {
+        "PROCUREMENT" => "2100",
+        "SERVICE_DELIVERY" => "2200",
+        _ => "2300",
     }
 }
 
