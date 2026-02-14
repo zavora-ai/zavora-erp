@@ -1262,7 +1262,8 @@ async fn ap_aging(
                 apo.order_id,
                 CASE
                     WHEN apo.source_type = 'PROCUREMENT' THEN '2100'
-                    ELSE '2200'
+                    WHEN apo.source_type = 'SERVICE_DELIVERY' THEN '2200'
+                    ELSE '2300'
                 END AS account,
                 apo.due_at,
                 COALESCE(SUM(ase.credit - ase.debit), 0) AS outstanding_ap

@@ -18,7 +18,9 @@ const INVENTORY_ACCOUNT: &str = "1300";
 const REVENUE_ACCOUNT: &str = "4000";
 const COGS_ACCOUNT: &str = "5000";
 const CASH_ACCOUNT: &str = "1000";
-const SERVICE_COST_CLEARING_ACCOUNT: &str = "2100";
+const PROCUREMENT_AP_ACCOUNT: &str = "2100";
+const SERVICE_COST_CLEARING_ACCOUNT: &str = "2200";
+const PAYROLL_AP_ACCOUNT: &str = "2300";
 const OPS_AGENT_ID: &str = "ops-orchestrator-agent";
 const AP_DEFAULT_TERMS_DAYS: i64 = 30;
 const COUNTERPARTY_PROCUREMENT_AUTO: &str = "supplier:auto";
@@ -313,6 +315,24 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
             issued_at,
         )
         .await?;
+        insert_journal(
+            &mut tx,
+            order_id,
+            INVENTORY_ACCOUNT,
+            procurement_ap_amount,
+            Decimal::ZERO,
+            "Procurement obligation recognized",
+        )
+        .await?;
+        insert_journal(
+            &mut tx,
+            order_id,
+            PROCUREMENT_AP_ACCOUNT,
+            Decimal::ZERO,
+            procurement_ap_amount,
+            "Procurement liability recognized",
+        )
+        .await?;
     }
     if transaction_type == TransactionType::Service && cogs > Decimal::ZERO {
         record_ap_obligation_with_entry(
@@ -424,6 +444,7 @@ async fn process_order(pool: &PgPool, order_id: Uuid) -> Result<OrderFulfilledEv
     )
     .await?;
     update_invoice_status_from_balance(&mut tx, invoice_id, ar_balance, issued_at).await?;
+    settle_open_ap_obligations(&mut tx, order_id, issued_at).await?;
 
     sqlx::query(
         "UPDATE orders SET status = 'FULFILLED', fulfilled_at = $2, updated_at = $2 WHERE id = $1",
@@ -1261,6 +1282,146 @@ async fn record_ap_obligation_with_entry(
     .await?;
 
     Ok(obligation_id)
+}
+
+async fn settle_open_ap_obligations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    settled_at: DateTime<Utc>,
+) -> Result<()> {
+    let obligations = sqlx::query(
+        r#"
+        SELECT id, source_type, currency
+        FROM ap_obligations
+        WHERE order_id = $1
+          AND status = 'OPEN'
+        ORDER BY created_at, id
+        FOR UPDATE
+        "#,
+    )
+    .bind(order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for row in obligations {
+        let ap_obligation_id: Uuid = row.try_get("id")?;
+        let source_type: String = row.try_get("source_type")?;
+        let currency: String = row.try_get("currency")?;
+
+        let outstanding_before = current_ap_obligation_balance(tx, ap_obligation_id).await?;
+        if outstanding_before <= Decimal::new(1, 2) {
+            mark_ap_obligation_settled(tx, ap_obligation_id, settled_at).await?;
+            continue;
+        }
+
+        let payment_entry_exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM ap_subledger_entries
+                WHERE ap_obligation_id = $1
+                  AND entry_type = 'PAYMENT_POSTED'
+            )
+            "#,
+        )
+        .bind(ap_obligation_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        let outstanding_after = if payment_entry_exists {
+            current_ap_obligation_balance(tx, ap_obligation_id).await?
+        } else {
+            let balance_after = post_ap_subledger_entry(
+                tx,
+                ap_obligation_id,
+                order_id,
+                "PAYMENT_POSTED",
+                outstanding_before.round_dp(4),
+                Decimal::ZERO,
+                &currency,
+                "AP payment posted",
+                settled_at,
+            )
+            .await?;
+
+            let liability_account = ap_liability_account_for_source_type(&source_type);
+            insert_journal(
+                tx,
+                order_id,
+                liability_account,
+                outstanding_before.round_dp(4),
+                Decimal::ZERO,
+                "AP liability settled",
+            )
+            .await?;
+            insert_journal(
+                tx,
+                order_id,
+                CASH_ACCOUNT,
+                Decimal::ZERO,
+                outstanding_before.round_dp(4),
+                "Cash disbursed for AP settlement",
+            )
+            .await?;
+
+            balance_after
+        };
+
+        if outstanding_after <= Decimal::new(1, 2) {
+            mark_ap_obligation_settled(tx, ap_obligation_id, settled_at).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ap_liability_account_for_source_type(source_type: &str) -> &'static str {
+    match source_type {
+        "PROCUREMENT" => PROCUREMENT_AP_ACCOUNT,
+        "SERVICE_DELIVERY" => SERVICE_COST_CLEARING_ACCOUNT,
+        "AUTONOMY_PAYROLL" => PAYROLL_AP_ACCOUNT,
+        _ => SERVICE_COST_CLEARING_ACCOUNT,
+    }
+}
+
+async fn current_ap_obligation_balance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ap_obligation_id: Uuid,
+) -> Result<Decimal> {
+    let balance = sqlx::query_scalar::<_, Decimal>(
+        r#"
+        SELECT COALESCE(MAX(balance_after), 0)
+        FROM ap_subledger_entries
+        WHERE ap_obligation_id = $1
+        "#,
+    )
+    .bind(ap_obligation_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(balance.round_dp(4))
+}
+
+async fn mark_ap_obligation_settled(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ap_obligation_id: Uuid,
+    settled_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE ap_obligations
+        SET status = 'SETTLED',
+            settled_at = COALESCE(settled_at, $2),
+            updated_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(ap_obligation_id)
+    .bind(settled_at)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
 }
 
 async fn post_ap_subledger_entry(
