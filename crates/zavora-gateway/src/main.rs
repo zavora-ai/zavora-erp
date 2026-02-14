@@ -41,8 +41,10 @@ const GOVERNANCE_ACTOR_IDS: [&str; 3] = ["board-agent", "strategy-agent", "contr
 const FINOPS_ACTOR_IDS: [&str; 3] = ["payroll-agent", "controller-agent", "board-agent"];
 const ACTION_ORDER_EXECUTION_PRODUCT: &str = "ORDER_EXECUTION_PRODUCT";
 const ACTION_ORDER_EXECUTION_SERVICE: &str = "ORDER_EXECUTION_SERVICE";
+const CASH_ACCOUNT: &str = "1000";
 const PAYROLL_EXPENSE_ACCOUNT: &str = "5100";
-const PAYROLL_CLEARING_ACCOUNT: &str = "2200";
+const PAYROLL_AP_ACCOUNT: &str = "2300";
+const AP_DEFAULT_TERMS_DAYS: i64 = 30;
 
 #[derive(Clone)]
 struct AppState {
@@ -3756,6 +3758,7 @@ async fn allocate_costs(
     let period_key = format!("{}|{}", period_start.to_rfc3339(), period_end.to_rfc3339());
     let order_ids: Vec<Uuid> = orders.iter().map(|order| order.order_id).collect();
     let delete_memo_pattern = format!("PAYROLL_ALLOC|{period_key}|%");
+    let payroll_counterparty = format!("autonomy-payroll:auto:{period_key}");
 
     sqlx::query(
         r#"
@@ -3774,6 +3777,10 @@ async fn allocate_costs(
         .bind(period_start)
         .bind(period_end)
         .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+
+    clear_period_payroll_ap_obligations(&mut tx, &order_ids, &payroll_counterparty)
         .await
         .map_err(internal_error)?;
 
@@ -3941,10 +3948,22 @@ async fn allocate_costs(
         insert_journal_line(
             &mut tx,
             order_id,
-            PAYROLL_CLEARING_ACCOUNT,
+            PAYROLL_AP_ACCOUNT,
             Decimal::ZERO,
             rounded_cost,
             &format!("{memo_prefix}|CREDIT"),
+        )
+        .await
+        .map_err(internal_error)?;
+        create_and_settle_payroll_ap_obligation(
+            &mut tx,
+            order_id,
+            rounded_cost,
+            &currency,
+            &requested_by_agent_id,
+            &payroll_counterparty,
+            &memo_prefix,
+            completed_at,
         )
         .await
         .map_err(internal_error)?;
@@ -4300,6 +4319,174 @@ async fn insert_journal_line(
     .bind(credit)
     .bind(memo)
     .bind(Utc::now())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn clear_period_payroll_ap_obligations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_ids: &[Uuid],
+    counterparty: &str,
+) -> AnyResult<()> {
+    if order_ids.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM ap_obligations
+        WHERE order_id = ANY($1)
+          AND source_type = 'AUTONOMY_PAYROLL'
+          AND counterparty = $2
+        "#,
+    )
+    .bind(order_ids)
+    .bind(counterparty)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn create_and_settle_payroll_ap_obligation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    amount: Decimal,
+    currency: &str,
+    actor_agent_id: &str,
+    counterparty: &str,
+    memo_prefix: &str,
+    posted_at: DateTime<Utc>,
+) -> AnyResult<()> {
+    let rounded_amount = amount.round_dp(4);
+    if rounded_amount <= Decimal::ZERO {
+        return Ok(());
+    }
+
+    let obligation_id = Uuid::new_v4();
+    let due_at = posted_at + Duration::days(AP_DEFAULT_TERMS_DAYS);
+
+    sqlx::query(
+        r#"
+        INSERT INTO ap_obligations (
+            id, order_id, source_type, counterparty, amount, currency, status,
+            due_at, settled_at, created_by_agent_id, created_at, updated_at
+        )
+        VALUES ($1, $2, 'AUTONOMY_PAYROLL', $3, $4, $5, 'OPEN', $6, NULL, $7, $8, $8)
+        "#,
+    )
+    .bind(obligation_id)
+    .bind(order_id)
+    .bind(counterparty)
+    .bind(rounded_amount)
+    .bind(currency)
+    .bind(due_at)
+    .bind(actor_agent_id)
+    .bind(posted_at)
+    .execute(&mut **tx)
+    .await?;
+
+    insert_ap_subledger_line(
+        tx,
+        obligation_id,
+        order_id,
+        "OBLIGATION_RECOGNIZED",
+        Decimal::ZERO,
+        rounded_amount,
+        rounded_amount,
+        currency,
+        &format!("{memo_prefix}|AP_OBLIGATION"),
+        actor_agent_id,
+        posted_at,
+    )
+    .await?;
+    insert_ap_subledger_line(
+        tx,
+        obligation_id,
+        order_id,
+        "PAYMENT_POSTED",
+        rounded_amount,
+        Decimal::ZERO,
+        Decimal::ZERO,
+        currency,
+        &format!("{memo_prefix}|AP_PAYMENT"),
+        actor_agent_id,
+        posted_at,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE ap_obligations
+        SET status = 'SETTLED',
+            settled_at = $2,
+            updated_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(obligation_id)
+    .bind(posted_at)
+    .execute(&mut **tx)
+    .await?;
+
+    insert_journal_line(
+        tx,
+        order_id,
+        PAYROLL_AP_ACCOUNT,
+        rounded_amount,
+        Decimal::ZERO,
+        &format!("{memo_prefix}|AP_SETTLE_DEBIT"),
+    )
+    .await?;
+    insert_journal_line(
+        tx,
+        order_id,
+        CASH_ACCOUNT,
+        Decimal::ZERO,
+        rounded_amount,
+        &format!("{memo_prefix}|AP_SETTLE_CREDIT"),
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_ap_subledger_line(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ap_obligation_id: Uuid,
+    order_id: Uuid,
+    entry_type: &str,
+    debit: Decimal,
+    credit: Decimal,
+    balance_after: Decimal,
+    currency: &str,
+    memo: &str,
+    actor_agent_id: &str,
+    posted_at: DateTime<Utc>,
+) -> AnyResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO ap_subledger_entries (
+            id, ap_obligation_id, order_id, entry_type, debit, credit, balance_after,
+            currency, memo, posted_by_agent_id, posted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(ap_obligation_id)
+    .bind(order_id)
+    .bind(entry_type)
+    .bind(debit.round_dp(4))
+    .bind(credit.round_dp(4))
+    .bind(balance_after.round_dp(4))
+    .bind(currency)
+    .bind(memo)
+    .bind(actor_agent_id)
+    .bind(posted_at)
     .execute(&mut **tx)
     .await?;
 
